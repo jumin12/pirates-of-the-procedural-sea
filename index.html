@@ -1207,7 +1207,7 @@ body > a[href="https://vibej.am/"][target="_blank"]{
 #settings-panel label{color:#a09080;font-size:11px;text-transform:uppercase;display:block;margin-top:12px;letter-spacing:0.08em;}
 #settings-volume,#settings-music-volume,#settings-sfx-volume{width:100%;margin-top:6px;accent-color:#d4a848;}
 #settings-scheme-row,#settings-sailing-camera-row{margin-top:8px;}
-#settings-scheme-row select,#settings-scheme-row .scheme-select,#settings-sailing-camera-row select{width:100%;margin-top:6px;background:rgba(16,10,6,0.9);color:#e0d6c2;border:1px solid rgba(120,90,35,0.4);border-radius:6px;padding:10px;font-family:Georgia,serif;font-size:13px;}
+#settings-scheme-row select,#settings-scheme-row .scheme-select,#settings-sailing-camera-row select,#settings-graphics{width:100%;margin-top:6px;background:rgba(16,10,6,0.9);color:#e0d6c2;border:1px solid rgba(120,90,35,0.4);border-radius:6px;padding:10px;font-family:Georgia,serif;font-size:13px;}
 .settings-actions{display:flex;flex-direction:column;gap:10px;margin-top:20px;}
 .settings-btn{width:100%;padding:12px 16px;border-radius:8px;cursor:pointer;font-family:Georgia,serif;font-size:14px;font-weight:600;transition:filter 0.15s,box-shadow 0.15s;touch-action:manipulation;border:1px solid rgba(140,110,60,0.45);}
 .settings-btn:hover{filter:brightness(1.05);}
@@ -2899,6 +2899,12 @@ body.game-help-mobile-minimal #game-help-panel{
     <input type="range" id="settings-music-volume" min="0" max="100" value="50" />
     <label for="settings-sfx-volume">Sound effects</label>
     <input type="range" id="settings-sfx-volume" min="0" max="100" value="100" />
+    <label for="settings-graphics">Graphics</label>
+    <select id="settings-graphics">
+      <option value="low">Low — fastest</option>
+      <option value="mid">Medium — default</option>
+      <option value="high">High — shadows &amp; extra water detail</option>
+    </select>
     <label for="settings-show-firing-arcs" style="margin-top:14px;">Show broadside firing arcs</label>
     <div style="margin-top:6px;">
       <input type="checkbox" id="settings-show-firing-arcs" checked style="accent-color:#d4a848;vertical-align:middle;" />
@@ -3019,6 +3025,20 @@ const isLowEndMobile = isMobile && (
   (_deviceMem != null && _deviceMem <= 3) ||
   (_deviceCores > 0 && _deviceCores <= 4)
 );
+function readStoredGraphicsTier() {
+  try {
+    const v = localStorage.getItem('pirates_graphics');
+    if (v === 'low' || v === 'mid' || v === 'high') return v;
+  } catch (e) {}
+  return null;
+}
+function detectDefaultGraphicsTier() {
+  if (isLowEndMobile) return 'low';
+  if (isMobile) return 'mid';
+  if ((_deviceMem != null && _deviceMem <= 4) || (_deviceCores > 0 && _deviceCores <= 4)) return 'low';
+  return 'mid';
+}
+let GRAPHICS_TIER = readStoredGraphicsTier() || detectDefaultGraphicsTier();
 function shouldDockChatPanel() {
   if (isMobile) return false;
   try {
@@ -3069,18 +3089,13 @@ function mmoSeaRegionLabel(wx, wz) {
   h = (h ^ (h >>> 13) ^ (cx * 12582917) ^ (cz * 2246822519)) >>> 0;
   return MMO_SEA_REGION_NAMES[h % MMO_SEA_REGION_NAMES.length];
 }
-const RENDER_DIST = isMobile ? (isLowEndMobile ? 1 : 2) : 3;
+let RENDER_DIST = GRAPHICS_TIER === 'high' && !isMobile ? 3 : (GRAPHICS_TIER === 'low' && isMobile ? 1 : 2);
 /** Extra chunk rings kept beyond `RENDER_DIST` (terrain unload only; visibility uses `RENDER_DIST` ring). */
-const CHUNK_UNLOAD_MARGIN = isLowEndMobile ? 1 : 2;
+const CHUNK_UNLOAD_MARGIN = isLowEndMobile || GRAPHICS_TIER === 'low' ? 1 : 2;
 function mainCanvasPixelRatio() {
   const raw = Math.max(0.5, window.devicePixelRatio || 1);
-  let cap = isMobile ? 1.36 : 1.65;
+  let cap = GRAPHICS_TIER === 'high' ? (isMobile ? 1.36 : 1.25) : (GRAPHICS_TIER === 'mid' ? 1.0 : 0.9);
   if (isLowEndMobile) cap = Math.min(cap, 1.0);
-  else if (isMobile) {
-    const mem = _deviceMem != null ? _deviceMem : 6;
-    if (mem <= 2) cap = 1.1;
-    else if (mem <= 4) cap = 1.24;
-  }
   return Math.max(0.5, Math.min(raw, cap));
 }
 /** Inset ship/cargo/yard/port previews: keep below main DPR to limit extra WebGL drawing buffers on phones. */
@@ -3554,6 +3569,7 @@ try {
   let _scm = localStorage.getItem('pirates_sailing_camera_mode');
   if (_scm !== 'free' && _scm !== 'chase') _scm = localStorage.getItem('pirates_mobile_camera_mode');
   if (_scm === 'free' || _scm === 'chase') G.sailingCameraMode = _scm;
+  G.graphicsQuality = GRAPHICS_TIER;
 } catch (e) {}
 
 /** One active play session per browser profile (shared localStorage): block second tab from entering the voyage. */
@@ -6150,14 +6166,19 @@ class SimplexNoise {
 let noise;
 
 /* ============================= THREE.JS SETUP ============================ */
-const renderer = new THREE.WebGLRenderer({ antialias: !isMobile, alpha: false, preserveDrawingBuffer: false, powerPreference: 'high-performance' });
+const renderer = new THREE.WebGLRenderer({
+  antialias: GRAPHICS_TIER === 'high' && !isMobile,
+  alpha: false,
+  preserveDrawingBuffer: false,
+  powerPreference: GRAPHICS_TIER === 'low' ? 'low-power' : 'high-performance'
+});
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(mainCanvasPixelRatio());
 if (renderer.outputColorSpace !== undefined) renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
-renderer.shadowMap.enabled = !isMobile;
-if (!isMobile) renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.enabled = GRAPHICS_TIER === 'high' && !isMobile;
+if (renderer.shadowMap.enabled) renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.setClearColor(0x152a45, 1);
 document.body.prepend(renderer.domElement);
 renderer.domElement.style.background = '#152a45';
@@ -6176,8 +6197,8 @@ renderer.domElement.addEventListener('webglcontextlost', e => {
 }, false);
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0x87a5c0, isLowEndMobile ? 0.00225 : 0.0018);
-const VIEW_CAMERA_FAR = isLowEndMobile ? 4200 : (isMobile ? 5800 : 8000);
+scene.fog = new THREE.FogExp2(0x87a5c0, GRAPHICS_TIER === 'low' ? 0.0024 : (GRAPHICS_TIER === 'mid' ? 0.00205 : 0.0018));
+let VIEW_CAMERA_FAR = GRAPHICS_TIER === 'low' ? 3800 : (GRAPHICS_TIER === 'mid' ? 5200 : (isMobile ? 5800 : 8000));
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.5, VIEW_CAMERA_FAR);
 /** Sky is a sphere centered on the camera; radius must be < camera.far or the dome is clipped (black sky). */
 const SKY_RADIUS = camera.far * 0.9;
@@ -6187,12 +6208,12 @@ const ambientLight = new THREE.AmbientLight(0x7799bb, 0.7);
 scene.add(ambientLight);
 const sunLight = new THREE.DirectionalLight(0xffeedd, 1.6);
 sunLight.position.set(200, 300, 100);
-if (!isMobile) {
+if (GRAPHICS_TIER === 'high' && !isMobile) {
   sunLight.castShadow = true;
-  sunLight.shadow.mapSize.set(1536, 1536);
+  sunLight.shadow.mapSize.set(1024, 1024);
   sunLight.shadow.camera.near = 10; sunLight.shadow.camera.far = 600;
-  sunLight.shadow.camera.left = -150; sunLight.shadow.camera.right = 150;
-  sunLight.shadow.camera.top = 150; sunLight.shadow.camera.bottom = -150;
+  sunLight.shadow.camera.left = -120; sunLight.shadow.camera.right = 120;
+  sunLight.shadow.camera.top = 120; sunLight.shadow.camera.bottom = -120;
 }
 scene.add(sunLight);
 const hemiLight = new THREE.HemisphereLight(0x87ceeb, 0x3a6b35, 0.4);
@@ -6216,8 +6237,8 @@ const skyUniforms = {
 const sky = new THREE.Mesh(
   new THREE.SphereGeometry(
     SKY_RADIUS,
-    isLowEndMobile ? 12 : (isMobile ? 20 : 48),
-    isLowEndMobile ? 8 : (isMobile ? 16 : 48)
+    GRAPHICS_TIER === 'low' ? 10 : (GRAPHICS_TIER === 'mid' ? 16 : 28),
+    GRAPHICS_TIER === 'low' ? 8 : (GRAPHICS_TIER === 'mid' ? 12 : 20)
   ),
   new THREE.ShaderMaterial({
     side: THREE.BackSide,
@@ -6332,9 +6353,9 @@ const waterUniforms = {
   uDayFactor: { value: 1 },
   uCamPos: { value: new THREE.Vector3() },
   /** 0 on mobile: skip sky/specular water reflections (faster, smoother). */
-  uReflectBlend: { value: isMobile ? 0 : 1 }
+  uReflectBlend: { value: GRAPHICS_TIER === 'high' && !isMobile ? 1 : 0 }
 };
-const WAKE_UNIFORM_SLOTS = isLowEndMobile ? 4 : (isMobile ? 8 : 16);
+const WAKE_UNIFORM_SLOTS = GRAPHICS_TIER === 'low' ? 4 : (GRAPHICS_TIER === 'mid' ? 8 : 12);
 const _waterWakeVecs = [];
 for (let wi = 0; wi < WAKE_UNIFORM_SLOTS; wi++) {
   const v = new THREE.Vector4(0, 0, 0, 0);
@@ -6644,7 +6665,7 @@ const waterFS = `
     gl_FragColor = vec4(color, waterAlpha);
   }`;
 
-const WATER_GRID_SEGS = isLowEndMobile ? 24 : (isMobile ? 40 : 96);
+let WATER_GRID_SEGS = GRAPHICS_TIER === 'low' ? 24 : (GRAPHICS_TIER === 'mid' ? 40 : 56);
 const waterGeom = new THREE.PlaneGeometry(WATER_PLANE_SIZE, WATER_PLANE_SIZE, WATER_GRID_SEGS, WATER_GRID_SEGS);
 waterGeom.rotateX(-Math.PI / 2);
 const water = new THREE.Mesh(waterGeom, new THREE.ShaderMaterial({
@@ -6697,8 +6718,36 @@ seabedGeom.rotateX(-Math.PI / 2);
 const seabed = new THREE.Mesh(seabedGeom, new THREE.MeshLambertMaterial({ map: seabedTex, color: 0xffffff }));
 seabed.position.set(0, SEABED_VISUAL_Y, 0);
 seabed.renderOrder = -2;
-seabed.receiveShadow = !isMobile;
+seabed.receiveShadow = GRAPHICS_TIER === 'high' && !isMobile;
 scene.add(seabed);
+
+let _chunkStreamCx = 1e9, _chunkStreamCz = 1e9;
+function applyGraphicsQuality(tier) {
+  if (tier !== 'low' && tier !== 'mid' && tier !== 'high') return;
+  GRAPHICS_TIER = tier;
+  try { G.graphicsQuality = tier; } catch (e) {}
+  RENDER_DIST = tier === 'high' && !isMobile ? 3 : (tier === 'low' && isMobile ? 1 : 2);
+  VIEW_CAMERA_FAR = tier === 'low' ? 3800 : (tier === 'mid' ? 5200 : (isMobile ? 5800 : 8000));
+  if (camera) camera.far = VIEW_CAMERA_FAR;
+  if (camera) camera.updateProjectionMatrix();
+  renderer.shadowMap.enabled = tier === 'high' && !isMobile;
+  sunLight.castShadow = renderer.shadowMap.enabled;
+  if (seabed) seabed.receiveShadow = renderer.shadowMap.enabled;
+  if (waterUniforms && waterUniforms.uReflectBlend) waterUniforms.uReflectBlend.value = (tier === 'high' && !isMobile) ? 1 : 0;
+  renderer.setPixelRatio(mainCanvasPixelRatio());
+  const wantSegs = tier === 'low' ? 24 : (tier === 'mid' ? 40 : 56);
+  if (wantSegs !== WATER_GRID_SEGS && water && water.geometry) {
+    WATER_GRID_SEGS = wantSegs;
+    const old = water.geometry;
+    const g = new THREE.PlaneGeometry(WATER_PLANE_SIZE, WATER_PLANE_SIZE, wantSegs, wantSegs);
+    g.rotateX(-Math.PI / 2);
+    water.geometry = g;
+    try { old.dispose(); } catch (e2) {}
+  }
+  if (scene.fog) scene.fog.density = tier === 'low' ? 0.0024 : (tier === 'mid' ? 0.00205 : 0.0018);
+  _chunkStreamCx = 1e9;
+  _chunkStreamCz = 1e9;
+}
 
 /** Legacy horizon billboards removed — they read as sky artifacts; procedural sky shader is enough. */
 let _horizonCloudBillboards = null;
@@ -6765,7 +6814,7 @@ function syncDayNightVisuals(camX, camZ) {
   scene.fog.color.lerpColors(_fogColDay, _fogColNight, 1 - dayFactor);
   scene.fog.density = 0.00135 + (1 - dayFactor) * 0.00055;
 
-  if (!isMobile) sunLight.castShadow = dayFactor > 0.2;
+  sunLight.castShadow = GRAPHICS_TIER === 'high' && !isMobile && dayFactor > 0.2;
 
   skyUniforms.uTime.value = G.time;
   skyUniforms.uSunDir.value.copy(_skySunDir);
@@ -11247,8 +11296,10 @@ function updateFish(dt) {
     const tz = l.z + f.userData.offsetZ;
     f.position.x = tx;
     f.position.z = tz;
+    const fishOn = isInTerrainStreamChunkRing(tx, tz, pcx, pcz);
+    f.visible = fishOn;
+    if (!fishOn) return;
     f.position.y = worldSeaSurfaceY(f.position.x, f.position.z) + l.floatOffset + Math.sin(t * 3 + f.userData.wiggle) * 0.08;
-    f.visible = isInTerrainStreamChunkRing(tx, tz, pcx, pcz);
     const a = t * l.wA + l.phA;
     const b = t * l.wB + l.phB;
     const vx = Math.cos(a) * l.wA * l.amp + Math.cos(b * 1.17) * l.wB * 1.17 * l.amp * 0.38;
@@ -11399,6 +11450,9 @@ function updateChunks() {
     if (t && Number.isFinite(t.x) && Number.isFinite(t.z)) { wx = t.x; wz = t.z; }
   }
   const pcx = Math.floor(wx / CHUNK_SIZE), pcz = Math.floor(wz / CHUNK_SIZE);
+  if (pcx === _chunkStreamCx && pcz === _chunkStreamCz && G.chunks.size) return;
+  _chunkStreamCx = pcx;
+  _chunkStreamCz = pcz;
   for (let dx = -RENDER_DIST; dx <= RENDER_DIST; dx++) {
     for (let dz = -RENDER_DIST; dz <= RENDER_DIST; dz++) {
       const cx = pcx + dx, cz = pcz + dz;
@@ -31820,7 +31874,7 @@ function update(dt) {
     const q = G._netStateDrainQueue;
     while (q.length > 128) q.shift();
     /** Apply several queued snapshots (oldest→newest); larger drain uses upgraded servers to preserve motion between ticks. */
-    const maxDrain = 22;
+    const maxDrain = GRAPHICS_TIER === 'low' ? 4 : 8;
     while (q.length > maxDrain) q.shift();
     const perfBase = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     const stateBurstWallStep = (1000 / NET_SYNC_HZ) * 0.065;
@@ -31843,7 +31897,7 @@ function update(dt) {
     while (arr.length > 64) arr.shift();
     const perfBase = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     /* Apply several queued npc_sync payloads per frame — collapsing to one discarded intermediate ticks and caused stair-step/stutter. */
-    const nDrain = Math.min(arr.length, 28);
+    const nDrain = Math.min(arr.length, GRAPHICS_TIER === 'low' ? 2 : 3);
     const npcBurstWallStep = (1000 / NET_SYNC_HZ) * 0.09;
     for (let di = 0; di < nDrain; di++) {
       try {
@@ -32204,13 +32258,20 @@ function update(dt) {
   tickTutorialRaidCutscene(dt);
   updateNPCs(dt);
   tickEscortAbandonment(dt);
-  G.npcs.forEach(npc => {
-    if (!npc.mesh || npc.sinking) return;
-    animateRemoteShipSails(npc.mesh, npc.x, npc.z, npc.rotation, npc.speed || 0, dt);
-    if (!npc.mesh.userData.crewManifest || !npc.mesh.userData.crewManifest.length) return;
-    const pseudo = { rotation: npc.rotation, speed: npc.speed || 0, docked: false, deckWalk: null };
-    updateRemoteCrewDeckAnimations(dt, npc.mesh, pseudo, npc.type || 'sloop');
-  });
+  {
+    const pxA = G.player.x, pzA = G.player.z;
+    const animR2 = GRAPHICS_TIER === 'low' ? 160 * 160 : 240 * 240;
+    for (let ni = 0; ni < G.npcs.length; ni++) {
+      const npc = G.npcs[ni];
+      if (!npc.mesh || npc.sinking) continue;
+      const ndx = npc.x - pxA, ndz = npc.z - pzA;
+      if (ndx * ndx + ndz * ndz > animR2) continue;
+      animateRemoteShipSails(npc.mesh, npc.x, npc.z, npc.rotation, npc.speed || 0, dt);
+      if (!npc.mesh.userData.crewManifest || !npc.mesh.userData.crewManifest.length) continue;
+      const pseudo = { rotation: npc.rotation, speed: npc.speed || 0, docked: false, deckWalk: null };
+      updateRemoteCrewDeckAnimations(dt, npc.mesh, pseudo, npc.type || 'sloop');
+    }
+  }
   storyBountyEnsureAcc += dt;
   if (storyBountyEnsureAcc >= 1.35) {
     storyBountyEnsureAcc = 0;
@@ -32227,10 +32288,12 @@ function update(dt) {
     checkPlayerSeaReefWreck();
   }
   updateTownFlagWindAnimation();
-  updateSeagulls(dt);
-  updateFish(dt);
-  updateAmbientSharkPairs(dt);
-  updateRescueSharkEscorts(dt);
+  if (GRAPHICS_TIER !== 'low' || (_gameLoopFrame & 1)) {
+    updateSeagulls(dt);
+    updateFish(dt);
+    updateAmbientSharkPairs(dt);
+    updateRescueSharkEscorts(dt);
+  }
   wildlifePruneAcc += dt;
   if (wildlifePruneAcc >= 2.1) {
     wildlifePruneAcc = 0;
@@ -32614,8 +32677,10 @@ function update(dt) {
       }
     }
   });
-  updateShipMeshCullVisibility();
-  updateDecorationCullVisibility();
+  if (GRAPHICS_TIER === 'high' || (_gameLoopFrame & 1)) {
+    updateShipMeshCullVisibility();
+    updateDecorationCullVisibility();
+  }
 
   for (let i = G.cannonballs.length - 1; i >= 0; i--) {
     const b = G.cannonballs[i];
@@ -33354,7 +33419,9 @@ function update(dt) {
     sendUpdate(shouldIncludeCrewOnPeriodicNetTick());
     const pvpGrapple = !!(G.boarding && G.boarding.partnerPlayerId != null && G.boarding.npcSyncId == null
       && (G.boarding.phase === 'pull' || G.boarding.phase === 'fight'));
-    sendTimer = ws?.readyState === 1 ? (pvpGrapple ? (1 / 60) : (1 / NET_SYNC_HZ)) : 0.05;
+    sendTimer = ws?.readyState === 1
+      ? (pvpGrapple ? (1 / 60) : (G._pvpNearby ? (1 / 30) : 0.05))
+      : 0.05;
   }
 
   if (!G._netYawBurstCd) G._netYawBurstCd = 0;
@@ -33939,8 +34006,14 @@ function updateHUD() {
   const imgS = document.getElementById('hud-sailcon');
   const txtH = document.getElementById('hud-hull-txt');
   const txtS = document.getElementById('hud-sail-txt');
-  if (imgH) imgH.src = resolveGameAssetUrl(`assets/ui/shipcon${hullT}.png`);
-  if (imgS) imgS.src = resolveGameAssetUrl(`assets/ui/sailcon${sailT}.png`);
+  if (imgH && G._hudHullTier !== hullT) {
+    G._hudHullTier = hullT;
+    imgH.src = resolveGameAssetUrl(`assets/ui/shipcon${hullT}.png`);
+  }
+  if (imgS && G._hudSailTier !== sailT) {
+    G._hudSailTier = sailT;
+    imgS.src = resolveGameAssetUrl(`assets/ui/sailcon${sailT}.png`);
+  }
   if (txtH) txtH.textContent = `Hull ${Math.round(hullN)}`;
   if (txtS) txtS.textContent = `Sails ${Math.round(rig)}%`;
   const hm = document.getElementById('hud-morale');
@@ -33991,6 +34064,9 @@ function gameLoop(time) {
       const calmBattle = (G.time - G._lastSeaBattleActivityT) > 60;
       const noPopups = !G.combatPopups3D || !G.combatPopups3D.length;
       if (idleMs > IDLE_RENDER_THROTTLE_MS && calmBattle && noPopups && (_gameLoopFrame & 1) === 0) skipRender = true;
+      if (dt > 0.033) G._slowFrameStreak = Math.min(48, (G._slowFrameStreak || 0) + 1);
+      else G._slowFrameStreak = Math.max(0, (G._slowFrameStreak || 0) - 2);
+      if ((G._slowFrameStreak || 0) > 8 && (_gameLoopFrame & 1) === 0) skipRender = true;
     }
     if (!skipRender) {
       try {
@@ -34018,8 +34094,8 @@ function gameLoop(time) {
         else if ((_gameLoopFrame & 1) === 0) drawFullmap();
       }
     } else {
-      if ((_gameLoopFrame & 1) === 0) drawMinimap();
-      if (fullmapOpen) drawFullmap();
+      if (_gameLoopFrame % 4 === 0) drawMinimap();
+      if (fullmapOpen && (_gameLoopFrame & 1) === 0) drawFullmap();
     }
     if (Math.floor(G.time * 4) !== Math.floor((G.time - dt) * 4)) updateHUD();
     syncHudToastAnchors();
@@ -35803,6 +35879,8 @@ function openSettingsPanel(options = {}) {
   if (volSfx) volSfx.value = String(Math.round(G.sfxVolume * 100));
   const firingArcs = document.getElementById('settings-show-firing-arcs');
   if (firingArcs) firingArcs.checked = !!G.showFiringArches;
+  const gfx = document.getElementById('settings-graphics');
+  if (gfx) gfx.value = GRAPHICS_TIER === 'high' || GRAPHICS_TIER === 'low' ? GRAPHICS_TIER : 'mid';
   const row = document.getElementById('settings-scheme-row');
   if (row) row.style.display = isMobile ? 'block' : 'none';
   const camRow = document.getElementById('settings-sailing-camera-row');
@@ -35943,6 +36021,13 @@ document.getElementById('settings-sfx-volume')?.addEventListener('input', e => {
 document.getElementById('settings-show-firing-arcs')?.addEventListener('change', e => {
   G.showFiringArches = !!e.target.checked;
   try { localStorage.setItem('pirates_show_firing_arches', G.showFiringArches ? '1' : '0'); } catch (err) {}
+});
+
+document.getElementById('settings-graphics')?.addEventListener('change', e => {
+  const v = e.target.value === 'high' || e.target.value === 'low' ? e.target.value : 'mid';
+  try { localStorage.setItem('pirates_graphics', v); } catch (err) {}
+  applyGraphicsQuality(v);
+  notify(v === 'low' ? 'Graphics: Low' : (v === 'high' ? 'Graphics: High' : 'Graphics: Medium'));
 });
 
 document.getElementById('settings-scheme-select')?.addEventListener('change', e => {
@@ -37478,6 +37563,7 @@ window.render_game_to_text = function () {
     myId: G.myId,
     npcSimFromServer: !!G.npcSimFromServer,
     rttMs: G.clientServerRttMs != null ? Math.round(G.clientServerRttMs) : null,
+    graphics: GRAPHICS_TIER,
     pendingResumeDock: !!G._pendingResumeDock,
     quests,
     player: {

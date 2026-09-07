@@ -88,3 +88,9 @@ Fixed dedicated-server and multiplayer bugs that broke combat, quests, and ship 
 - High ping can still look wrong; rewind + wider interp reduces “I hit / you didn’t,” it does not remove lag.
 - Full live PvP/boarding/quest session still needs a second human client. Automated playtest covers sail / dock-proximity / reconnect hooks, not two-player combat.
 - If `buildSeaReefSpireGroup` fails on the client, that reef is skipped visually but the server still has a disc.
+
+## 2026-09-07 performance pass
+
+- Default graphics is **Medium** (Settings → Graphics). High is opt-in.
+- Medium/Low: no shadow pass, lower pixel ratio, coarser water, shorter view distance.
+- Per-frame: only nearby NPC sails/crew animate, chunk rebuilds only on chunk change, net drain capped, sailing updates send at 20 Hz, minimap every 4 frames, skip a WebGL frame when already under 30 fps.
