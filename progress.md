@@ -64,3 +64,16 @@ Fixed dedicated-server and multiplayer bugs that broke combat, quests, and ship 
 - Authoritative PvP cannon hits (still victim-simulated).
 - Share reef occupancy with the Node NPC sim so dedicated-server hulls cannot clip reefs.
 - Port merchant stockpile economy onto the server when `npcSimFromServer` is on.
+
+---
+
+## 2026-09-07 follow-up: remaining dedicated-server / PvP gaps
+
+- PvP cannon hits are now shooter-claimed and server-validated (`pvp_hit_claim` / `pvp_hit_apply`); victims no longer apply incoming peer balls locally while connected.
+- Dedicated-server NPC nav uses the same reef occupancy walk as the client and can wreck on reefs.
+- Merchant load/unload updates server town stockpiles and broadcasts `town_stockpiles` / `politics_snap.ts`.
+
+## TODOs / Suggestions for next agent
+
+- Harbor PvP truce is still client-enforced on the claim send; consider a server-side harbor test.
+- Reef collision radii on the server are an estimate (no mesh piece count); scrape feel may differ slightly from the client.

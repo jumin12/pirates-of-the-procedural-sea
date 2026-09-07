@@ -114,7 +114,10 @@ function ensureNpcWorld() {
       edgeClamp: PLAYER_WORLD_EDGE_CLAMP,
       worldMapPayload: currentWorldMapPayloadOrNull(),
       politicsRef: pol,
-      getPlayerStanding: (pid) => ensureWorldPolitics().getPlayerStanding(pid)
+      getPlayerStanding: (pid) => ensureWorldPolitics().getPlayerStanding(pid),
+      onTownCargo: (kind, key, good, amt, cx, cz) => {
+        try { ensureWorldPolitics().applyTownCargo(kind, key, good, amt, cx, cz); } catch (e) {}
+      }
     });
     npcWorld.setBroadcastAll(broadcastAll);
   }
@@ -2555,7 +2558,8 @@ wss.on('connection', (ws, req) => {
     fw: wpSnap.factionWealth,
     pc: wpSnap.portController,
     inf: wpSnap.inflation,
-    pg: wpSnap.portGarrison
+    pg: wpSnap.portGarrison,
+    ts: wpSnap.townStockpiles
   };
   ws.send(JSON.stringify({
     type: 'init',
@@ -2991,6 +2995,44 @@ wss.on('connection', (ws, req) => {
           const ammoType = a === 'grape' || a === 'chain' || a === 'grape_pellet' ? a : 'ball';
           const cy = msg.y != null && Number.isFinite(Number(msg.y)) ? Number(msg.y) : null;
           broadcast({ type: 'cannonball', shooterId: id, x: msg.x, z: msg.z, y: cy, dx: msg.dx, dz: msg.dz, ammoType }, id);
+          break;
+        }
+        case 'pvp_hit_claim': {
+          const tid = Math.floor(Number(msg.targetId));
+          if (!Number.isFinite(tid) || tid === id || !players.has(tid)) break;
+          const nowHit = Date.now();
+          if (!ws._pvpHitTokens) ws._pvpHitTokens = { n: 0, t: nowHit };
+          if (nowHit - ws._pvpHitTokens.t > 1000) { ws._pvpHitTokens.n = 0; ws._pvpHitTokens.t = nowHit; }
+          ws._pvpHitTokens.n++;
+          if (ws._pvpHitTokens.n > 16) break;
+          const atk = players.get(id);
+          const vic = players.get(tid);
+          if (!atk || !vic || atk.docked || vic.docked) break;
+          const dHit = Math.hypot((atk.x || 0) - (vic.x || 0), (atk.z || 0) - (vic.z || 0));
+          if (dHit > 280) break;
+          const aRaw = msg.ammoType;
+          const isPellet = msg.isPellet === true || aRaw === 'grape_pellet';
+          const ammoType = isPellet ? 'grape' : (aRaw === 'grape' || aRaw === 'chain' ? aRaw : 'ball');
+          let hull = 9, morale = 4, rig = 0;
+          if (ammoType === 'grape' && isPellet) { hull = 2; morale = 1.2; }
+          else if (ammoType === 'grape') { hull = 4; morale = 8; }
+          else if (ammoType === 'chain') { hull = 6; morale = 6; rig = 30 + Math.random() * 14; }
+          vic.health = Math.max(0, (vic.health != null ? Number(vic.health) : 100) - hull);
+          if (vic.morale != null) vic.morale = Math.max(0, Number(vic.morale) - morale);
+          if (rig) vic.riggingHealth = Math.max(0, (vic.riggingHealth != null ? Number(vic.riggingHealth) : 100) - rig);
+          const hx = msg.hx != null && Number.isFinite(Number(msg.hx)) ? Number(msg.hx) : vic.x;
+          const hz = msg.hz != null && Number.isFinite(Number(msg.hz)) ? Number(msg.hz) : vic.z;
+          sendToPlayerId(tid, {
+            type: 'pvp_hit_apply',
+            fromId: id,
+            ammoType,
+            isPellet,
+            hull,
+            morale,
+            rigging: rig,
+            hx,
+            hz
+          });
           break;
         }
         case 'sea_debris': {
@@ -4292,6 +4334,11 @@ setInterval(() => {
   } catch (e) {}
   npcWorld.step(1 / TICK_RATE, players, playerStories, playerQuests);
   try {
+    if (ensureWorldPolitics().consumeStockpileDirty()) {
+      broadcastAll({ type: 'town_stockpiles', ts: ensureWorldPolitics().snapshot().townStockpiles });
+    }
+  } catch (eTs) {}
+  try {
     broadcastGameplayJsonGlobal({
       type: 'npc_sync',
       npcs: npcWorld.buildSyncRows(),
@@ -4308,7 +4355,8 @@ setInterval(() => {
         fw: wp.factionWealth,
         pc: wp.portController,
         inf: wp.inflation,
-        pg: wp.portGarrison
+        pg: wp.portGarrison,
+        ts: wp.townStockpiles
       });
     } catch (e) {}
   }

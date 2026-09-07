@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 const FACTION_COUNT = 5;
+const PORT_EXPORT_POOL = ['food', 'cannonballs', 'grapeshot', 'chainshot', 'wood', 'cloth', 'iron', 'rum', 'gunpowder'];
 
 function makeDefaultMatrix(ws) {
   const matrix = [];
@@ -27,8 +28,10 @@ function createWorldPoliticsStore(opts) {
   let inflation = 1;
   let portGarrison = Object.create(null);
   let playerStandings = Object.create(null);
+  let townStockpiles = Object.create(null);
   let _econAcc = 0;
   let _dirty = false;
+  let _stockDirty = false;
 
   function markDirty() {
     _dirty = true;
@@ -47,7 +50,8 @@ function createWorldPoliticsStore(opts) {
       factionWealth: factionWealth.slice(),
       inflation,
       portGarrison: JSON.parse(JSON.stringify(portGarrison)),
-      playerStandings: JSON.parse(JSON.stringify(playerStandings))
+      playerStandings: JSON.parse(JSON.stringify(playerStandings)),
+      townStockpiles: JSON.parse(JSON.stringify(townStockpiles))
     };
   }
 
@@ -86,6 +90,18 @@ function createWorldPoliticsStore(opts) {
         }
         playerStandings = next;
       }
+      if (raw.townStockpiles && typeof raw.townStockpiles === 'object') {
+        townStockpiles = Object.create(null);
+        for (const k of Object.keys(raw.townStockpiles)) {
+          const row = raw.townStockpiles[k];
+          if (!row || typeof row !== 'object') continue;
+          const o = {};
+          for (const gid of PORT_EXPORT_POOL) {
+            if (row[gid] != null && Number.isFinite(Number(row[gid]))) o[gid] = Math.max(0, Math.floor(Number(row[gid])));
+          }
+          townStockpiles[k] = o;
+        }
+      }
     } catch (e) {
       console.warn('[playground] world politics load failed:', e && e.message ? e.message : e);
     }
@@ -103,7 +119,8 @@ function createWorldPoliticsStore(opts) {
         factionWealth,
         inflation,
         portGarrison,
-        playerStandings
+        playerStandings,
+        townStockpiles
       }));
     } catch (e) {
       console.warn('[playground] world politics save failed:', e && e.message ? e.message : e);
@@ -149,9 +166,44 @@ function createWorldPoliticsStore(opts) {
     inflation = 1;
     portGarrison = Object.create(null);
     playerStandings = Object.create(null);
+    townStockpiles = Object.create(null);
     _econAcc = 0;
     markDirty();
+    _stockDirty = true;
     save();
+  }
+
+  function ensureStockpileRow(key, cx, cz) {
+    if (!key) return null;
+    if (townStockpiles[key] && typeof townStockpiles[key] === 'object') return townStockpiles[key];
+    const o = {};
+    const sx = cx | 0, sz = cz | 0;
+    PORT_EXPORT_POOL.forEach(gid => {
+      const h = ((worldSeed ^ sx * 1315423911 ^ sz * 19349663 ^ gid.length * 409) >>> 0) % 97;
+      o[gid] = 48 + h;
+    });
+    townStockpiles[key] = o;
+    return o;
+  }
+
+  function applyTownCargo(kind, key, goodId, amt, cx, cz) {
+    const good = String(goodId || '');
+    if (!PORT_EXPORT_POOL.includes(good)) return false;
+    const n = Math.max(0, Math.floor(Number(amt) || 0));
+    if (!key || n <= 0) return false;
+    const row = ensureStockpileRow(String(key).slice(0, 64), cx, cz);
+    if (!row) return false;
+    if (kind === 'add') row[good] = (row[good] || 0) + n;
+    else row[good] = Math.max(0, (row[good] || 0) - n);
+    markDirty();
+    _stockDirty = true;
+    return true;
+  }
+
+  function consumeStockpileDirty() {
+    const d = _stockDirty;
+    _stockDirty = false;
+    return d;
   }
 
   function setPlayerStanding(pid, raw) {
@@ -178,6 +230,11 @@ function createWorldPoliticsStore(opts) {
     setPlayerStanding,
     getPlayerStanding,
     consumeDirty,
+    applyTownCargo,
+    consumeStockpileDirty,
+    get townStockpiles() {
+      return townStockpiles;
+    },
     get matrix() {
       return matrix;
     },

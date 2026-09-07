@@ -8783,6 +8783,7 @@ function ensurePortGarrisonForKey(k) {
   G.politics.portGarrison[k] = { men: 160 + (h % 240), payrollDue: 30 + (h % 50) };
 }
 function tickPoliticsEconomy(dt) {
+  if (G.npcSimFromServer) return;
   if (G.mode !== 'playing') return;
   ensurePolitics();
   G.politics._econAcc = (G.politics._econAcc || 0) + dt;
@@ -9288,6 +9289,15 @@ function initTownStockpiles() {
     G.townStockpiles[k] = o;
   }
 }
+function applyTownStockpilesFromNet(ts) {
+  if (!ts || typeof ts !== 'object') return;
+  if (!G.townStockpiles) G.townStockpiles = {};
+  for (const k of Object.keys(ts)) {
+    const row = ts[k];
+    if (!row || typeof row !== 'object') continue;
+    G.townStockpiles[k] = { ...row };
+  }
+}
 function addTownStockpile(key, goodId, amt) {
   if (!G.townStockpiles || !key || !goodId || amt <= 0) return;
   if (!G.townStockpiles[key]) G.townStockpiles[key] = {};
@@ -9319,6 +9329,7 @@ function ensureStockpileForPort(p) {
   return k;
 }
 function tickTownEconomy(dt) {
+  if (G.npcSimFromServer) return;
   if (!G.townStockpiles || G.mode !== 'playing') return;
   G.townEconomyAcc += dt;
   if (G.townEconomyAcc < 6) return;
@@ -20437,6 +20448,7 @@ async function connectToServer() {
           if (pw.pc && typeof pw.pc === 'object') G.politics.portController = { ...pw.pc };
           if (pw.inf != null && Number.isFinite(Number(pw.inf))) G.politics.inflation = Number(pw.inf);
           if (pw.pg && typeof pw.pg === 'object') G.politics.portGarrison = { ...pw.pg };
+          if (pw.ts && typeof pw.ts === 'object') applyTownStockpilesFromNet(pw.ts);
         }
         if (msg.myPlayerPolitics && typeof msg.myPlayerPolitics === 'object' && G.npcSimFromServer) {
           ensurePolitics();
@@ -20972,6 +20984,45 @@ async function connectToServer() {
         applyAuthorizedNpcDamageFromPlayerShot(npc, fromId, at, isPellet, hx, hy, hz);
         break;
       }
+      case 'pvp_hit_apply': {
+        if (G.playerSinking || G.docked || G.player.health <= 0) break;
+        const fromId = msg.fromId != null ? Number(msg.fromId) : null;
+        G.lastAttackerId = fromId != null && Number.isFinite(fromId) ? fromId : null;
+        if (fromId != null && G.otherPlayers.has(fromId)) {
+          const op = G.otherPlayers.get(fromId);
+          const capN = networkPlayerCaptainName(op);
+          G.lastAttacker = `${op.shipName || 'Unknown Ship'} (Captain ${capN})`;
+        }
+        const hull = Math.max(0, Number(msg.hull) || 0);
+        const morale = Math.max(0, Number(msg.morale) || 0);
+        const rig = Math.max(0, Number(msg.rigging) || 0);
+        const hx = msg.hx != null && Number.isFinite(Number(msg.hx)) ? Number(msg.hx) : G.player.x;
+        const hz = msg.hz != null && Number.isFinite(Number(msg.hz)) ? Number(msg.hz) : G.player.z;
+        const at = msg.ammoType === 'grape' || msg.ammoType === 'chain' ? msg.ammoType : 'ball';
+        const isPellet = !!msg.isPellet;
+        markSeaBattleActivity();
+        const hitY = SEA_LEVEL + 1.2;
+        const hullAud = playerShipAudioWorldXYZ();
+        playShipDamageSound(isPellet ? 0.52 : 0.92, hullAud.x, hullAud.y, hullAud.z);
+        spawnDamageChunks(hx, hitY, hz);
+        spawnSeaDebrisFromHit(hx, hz, at === 'grape' ? (isPellet ? 2 : 5) : at === 'chain' ? 8 : 4);
+        if (hull) G.player.health = Math.max(0, G.player.health - hull);
+        if (morale) G.player.morale = Math.max(0, (G.player.morale != null ? G.player.morale : 100) - morale);
+        if (rig) {
+          G.player.riggingHealth = Math.max(0, (G.player.riggingHealth != null ? G.player.riggingHealth : 100) - rig);
+          applyRiggingVisualToGroup(playerShipGroup, G.player.riggingHealth);
+        }
+        const pwx = G.player.x, pwz = G.player.z;
+        if (at === 'chain') {
+          showCombatPopupWorld(pwx, pwz, `Chain shot · hull −${Math.round(hull)} (${Math.round(G.player.health)} HP)`, { cssClass: 'chain' });
+        } else if (at === 'grape') {
+          showCombatPopupWorld(pwx, pwz, `Grapeshot · hull −${Math.round(hull)} (${Math.round(G.player.health)} HP)`, { cssClass: 'grape' });
+        } else {
+          showCombatPopupWorld(pwx, pwz, `Round shot · hull −${Math.round(hull)} (${Math.round(G.player.health)} HP)`);
+        }
+        triggerCombatFireHint();
+        break;
+      }
       case 'pvp_ram_hit': {
         const fromId = msg.fromId != null ? Number(msg.fromId) : null;
         if (fromId != null && Number.isFinite(fromId) && G.myId != null && Number(fromId) === Number(G.myId)) break;
@@ -21258,8 +21309,12 @@ async function connectToServer() {
         if (msg.pc && typeof msg.pc === 'object') G.politics.portController = { ...msg.pc };
         if (msg.inf != null && Number.isFinite(Number(msg.inf))) G.politics.inflation = Number(msg.inf);
         if (msg.pg && typeof msg.pg === 'object') G.politics.portGarrison = { ...msg.pg };
+        if (msg.ts && typeof msg.ts === 'object') applyTownStockpilesFromNet(msg.ts);
         break;
       }
+      case 'town_stockpiles':
+        if (msg.ts && typeof msg.ts === 'object') applyTownStockpilesFromNet(msg.ts);
+        break;
       case 'npc_sync':
         enqueueNpcSyncMessage(msg);
         break;
@@ -32673,8 +32728,13 @@ function update(dt) {
           }
         }
         if (!npcTutorialSkip) {
-          applyAmmoHitToLocalPlayer(at, b.sourcePlayerId, b.x, b.z, isPellet);
-          triggerCombatFireHint();
+          if (b.owner === 'other_player' && ws?.readyState === 1) {
+            spawnDamageChunks(b.x, SEA_LEVEL + 1.2, b.z);
+            triggerCombatFireHint();
+          } else {
+            applyAmmoHitToLocalPlayer(at, b.sourcePlayerId, b.x, b.z, isPellet);
+            triggerCombatFireHint();
+          }
         }
         b.life = 0;
       }
@@ -32706,6 +32766,19 @@ function update(dt) {
           else if (at === 'chain') msg = `Chain · hull −6 · sails`;
           else if (at === 'grape') msg = isPellet ? `Grape · hull −2` : `Grapeshot · hull −4`;
           showCombatPopupWorld(op.x, op.z, msg, { cssClass: at === 'chain' ? 'chain' : at === 'grape' ? 'grape' : '' });
+          const claimId = op.id != null ? op.id : opId;
+          if (ws?.readyState === 1 && claimId != null) {
+            try {
+              ws.send(JSON.stringify({
+                type: 'pvp_hit_claim',
+                targetId: claimId,
+                ammoType: isPellet ? 'grape_pellet' : at,
+                isPellet: !!isPellet,
+                hx: b.x,
+                hz: b.z
+              }));
+            } catch (eHit) {}
+          }
           b.life = 0;
         }
       });

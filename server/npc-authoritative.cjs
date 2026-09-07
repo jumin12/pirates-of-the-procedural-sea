@@ -10,6 +10,7 @@ const NPC_SPAWN_EXTRA_GAP = 12;
 const PLAYER_BROADSIDE_COOLDOWN = 2.5;
 const CANNONBALL_XY_SPEED = 35;
 const TRADE_DOCK_DIST = 40;
+const TRADE_DELIVERY_UNITS = 12;
 const PORT_EXPORT_POOL = ['food', 'cannonballs', 'grapeshot', 'chainshot', 'wood', 'cloth', 'iron', 'rum', 'gunpowder'];
 /** Vanilla pirate slots (syncId 0..n-1) respawn this long after removal (matches browser host). */
 const VANILLA_PIRATE_RESPAWN_MS = 180000;
@@ -142,6 +143,11 @@ function factionsConsideredAtWar(a, b, matrix) {
   const j = (b | 0) % FACTION_COUNT;
   if (i === j) return false;
   return (matrix[i][j] + matrix[j][i]) / 2 < 18;
+}
+
+function portStockKey(meta) {
+  if (meta && meta.customTownId != null && String(meta.customTownId).length) return `c:${meta.customTownId}`;
+  return `${(meta && meta.cx) | 0},${(meta && meta.cz) | 0}`;
 }
 
 function townFaction(meta, portController, ws) {
@@ -1137,8 +1143,10 @@ function createServerNpcWorld(opts) {
     opts.politicsRef && opts.politicsRef.matrix && opts.politicsRef.portController
       ? opts.politicsRef
       : { matrix: makePoliticsMatrix(ws), portController: Object.create(null), factionWealth: [1400, 1400, 1400, 1400, 1400] };
+  const onTownCargo = typeof opts.onTownCargo === 'function' ? opts.onTownCargo : null;
   let ctx = createTerrainContext({ worldSeed: ws, edgeClamp: baseEdgeClamp, worldMapPayload: worldMapPayloadRef });
-  let dryLand = (x, z) => ctx.dryLandAtWorldPosition(x, z);
+  let dryLand = (x, z) => ctx.dryLandAtWorldPosition(x, z)
+    || (typeof ctx.reefBlocksPoint === 'function' && ctx.reefBlocksPoint(x, z, 0.76));
   let edgeClamp = ctx.edgeClamp;
   const spawnClearanceOk = (wx, wz, c) => ctx.hasMinClearanceFromLand(wx, wz, c);
   let npcs = [];
@@ -1154,14 +1162,16 @@ function createServerNpcWorld(opts) {
   function setWorldMapPayload(payload) {
     worldMapPayloadRef = payload && typeof payload === 'object' ? payload : null;
     ctx = createTerrainContext({ worldSeed: ws, edgeClamp: baseEdgeClamp, worldMapPayload: worldMapPayloadRef });
-    dryLand = (x, z) => ctx.dryLandAtWorldPosition(x, z);
+    dryLand = (x, z) => ctx.dryLandAtWorldPosition(x, z)
+      || (typeof ctx.reefBlocksPoint === 'function' && ctx.reefBlocksPoint(x, z, 0.76));
     edgeClamp = ctx.edgeClamp;
   }
 
   function setWorldSeed(newSeed) {
     ws = (Number(newSeed) >>> 0) || 42;
     ctx = createTerrainContext({ worldSeed: ws, edgeClamp: baseEdgeClamp, worldMapPayload: worldMapPayloadRef });
-    dryLand = (x, z) => ctx.dryLandAtWorldPosition(x, z);
+    dryLand = (x, z) => ctx.dryLandAtWorldPosition(x, z)
+      || (typeof ctx.reefBlocksPoint === 'function' && ctx.reefBlocksPoint(x, z, 0.76));
     edgeClamp = ctx.edgeClamp;
     if (!opts.politicsRef || !opts.politicsRef.matrix) {
       politics = { matrix: makePoliticsMatrix(ws), portController: Object.create(null), factionWealth: [1400, 1400, 1400, 1400, 1400] };
@@ -1736,6 +1746,11 @@ function createServerNpcWorld(opts) {
           }
         }
         if (npc.tradeTimer <= 0) {
+          if (onTownCargo && npc.cargoGood) {
+            const hk = portStockKey({ cx: npc.homeCx, cz: npc.homeCz, hasTown: true, customTownId: npc.homeCustomTownId });
+            const q = npc.cargoUnits != null ? npc.cargoUnits : TRADE_DELIVERY_UNITS;
+            onTownCargo('sub', hk, npc.cargoGood, q, npc.homeCx | 0, npc.homeCz | 0);
+          }
           npc.tradePhase = 'to_dest';
           npc.targetCruise = npcMaxForwardSpeed(npc) * (0.94 + Math.random() * 0.055);
           npc.tradeCruiseSpeed = npc.targetCruise;
@@ -1781,6 +1796,11 @@ function createServerNpcWorld(opts) {
         }
         if (npc.tradeTimer <= 0) {
           if (phase === 'dock_dest') {
+            if (onTownCargo && npc.cargoGood && !npc.isTroopTransport) {
+              const dk = portStockKey({ cx: npc.destCx, cz: npc.destCz, hasTown: true, customTownId: npc.destCustomTownId });
+              const dq = npc.cargoUnits != null ? npc.cargoUnits : TRADE_DELIVERY_UNITS;
+              onTownCargo('add', dk, npc.cargoGood, dq, npc.destCx | 0, npc.destCz | 0);
+            }
             npc.tradeDestX = npc.homeDockX;
             npc.tradeDestZ = npc.homeDockZ;
             npc.tradePhase = 'to_home';
@@ -1957,6 +1977,24 @@ function createServerNpcWorld(opts) {
       if (npc.health != null && npc.health <= 0) continue;
       if (npc.isTradeShip) stepMerchant(npc, dt, playerMap);
       else stepCombatNpc(npc, dt, playerMap, !!npc.isFactionPatrol);
+      if (ctx.reefBlocksPoint && ctx.reefBlocksPoint(npc.x, npc.z, shipHullRadius(npc.type || 'sloop') * 0.22)) {
+        npc._reefScrapeAcc = (npc._reefScrapeAcc || 0) + dt;
+        if (npc._reefScrapeAcc > 0.85) {
+          npc._reefScrapeAcc = 0;
+          const spd = Math.abs(npc.speed || 0);
+          const dmg = Math.max(8, Math.min(32, Math.round(14 + spd * 12 + Math.random() * 9)));
+          const h0 = npc.health != null && Number.isFinite(Number(npc.health)) ? Number(npc.health) : 72;
+          npc.health = Math.max(0, h0 - dmg);
+          if (npc.health <= 0) {
+            npc.health = 0;
+            npc.sinking = true;
+            npc.sinkTimer = 0;
+            npc.speed = 0;
+          }
+        }
+      } else {
+        npc._reefScrapeAcc = 0;
+      }
     }
     for (let i = 0; i < npcs.length; i++) {
       const a = npcs[i];

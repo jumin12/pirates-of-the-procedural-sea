@@ -119,6 +119,19 @@ function createTerrainContext(opts) {
     return procedural.forEachProceduralIslandInWorldBounds(minWx, maxWx, minWz, maxWz, fn, centerWx, centerWz);
   }
 
+  const reefs = useCustom
+    ? []
+    : buildSeaReefOccupancy(worldSeed, dryLandAtWorldPosition, procedural.CHUNK_SIZE || CHUNK_SIZE);
+
+  function reefBlocksPoint(wx, wz, clearance) {
+    const c = clearance != null ? clearance : 0.76;
+    for (let i = 0; i < reefs.length; i++) {
+      const r = reefs[i];
+      if (Math.hypot(wx - r.x, wz - r.z) < r.r + c) return true;
+    }
+    return false;
+  }
+
   return {
     worldSeed,
     edgeClamp: lim,
@@ -129,8 +142,51 @@ function createTerrainContext(opts) {
     getProceduralIslandMeta,
     collectAllTradingPorts,
     forEachProceduralIslandInWorldBounds,
-    sampleCustomHeight01: useCustom ? sampleCustomHeight01 : null
+    sampleCustomHeight01: useCustom ? sampleCustomHeight01 : null,
+    reefs,
+    reefBlocksPoint
   };
+}
+
+function islandRng(worldSeed, cx, cz) {
+  let s = (worldSeed >>> 0) ^ (Math.imul(cx, 73856093) >>> 0) ^ (Math.imul(cz, 19349663) >>> 0) ^ 0x6eed1e5d;
+  if (s === 0) s = 0xa341316c;
+  return function rand() {
+    s = (Math.imul(1664525, s) + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
+/** Collision discs only — same chunk walk / first RNG draws as client `ensureSeaReefsPopulated`. */
+function buildSeaReefOccupancy(worldSeed, dryLand, chunkSize) {
+  const CHUNK = chunkSize || CHUNK_SIZE;
+  const HALF = 7;
+  const out = [];
+  for (let cx = -HALF; cx <= HALF; cx++) {
+    for (let cz = -HALF; cz <= HALF; cz++) {
+      const rng = islandRng(worldSeed, cx + 1900, cz + 2900);
+      if (rng() > 0.112) continue;
+      let wx, wz, tries = 0;
+      do {
+        wx = cx * CHUNK + rng() * CHUNK;
+        wz = cz * CHUNK + rng() * CHUNK;
+        tries++;
+      } while (tries < 34 && dryLand(wx, wz));
+      if (dryLand(wx, wz)) continue;
+      rng();
+      rng();
+      const form = rng();
+      let nSpires = 2;
+      if (form < 0.14) nSpires = 1;
+      else if (form < 0.42) nSpires = 2;
+      else if (form < 0.72) nSpires = 3;
+      else nSpires = 4;
+      const armBase = 0.32 + rng() * 0.48;
+      const hitR = 0.72 + nSpires * 0.16 + armBase * 0.38 + 0.22;
+      out.push({ x: wx, z: wz, r: hitR * 0.82 });
+    }
+  }
+  return out;
 }
 
 /** Deterministic spawn: prefer open water offshore of a trading port/island (~165–295u from docks), fallback to legacy random ocean clearance. */
