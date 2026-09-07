@@ -4249,7 +4249,34 @@ function applyLocalNpcKillLootFromNet(msg) {
     const gi = G.player.inventory.find(x => x.id === 'gold');
     if (gi) gi.count += gold;
   }
-  if (huntNpcName) checkHuntQuestOnNpcSink({ name: huntNpcName });
+  const applyQuestSideEffects = !!(G.npcSimFromServer || !isMultiplayerHost());
+  const huntName = huntNpcName || victimName;
+  if (applyQuestSideEffects && huntName) {
+    const stub = {
+      name: huntName,
+      sinking: false,
+      isTradeShip: !!msg.victimIsTrade,
+      isStoryBounty: !!msg.storyBounty,
+      factionId: msg.victimFaction != null && Number.isFinite(Number(msg.victimFaction))
+        ? (Number(msg.victimFaction) | 0) % FACTION_COUNT
+        : null,
+      homeFaction: msg.victimFaction != null && Number.isFinite(Number(msg.victimFaction))
+        ? (Number(msg.victimFaction) | 0) % FACTION_COUNT
+        : null
+    };
+    checkHuntQuestOnNpcSink(stub);
+    tryProgressFactionLetters(stub, G.myId);
+  }
+  if (applyQuestSideEffects && !msg.storyBounty && !msg.victimIsEscort) {
+    ensurePolitics();
+    const vf = msg.victimFaction != null && Number.isFinite(Number(msg.victimFaction))
+      ? (Number(msg.victimFaction) | 0) % FACTION_COUNT
+      : null;
+    if (vf != null) {
+      adjustPlayerFactionRelation(vf, -8);
+      G.politics.crimes = Math.min(999, (G.politics.crimes || 0) + 5);
+    }
+  }
   reconcileSlotsWithInventory();
 }
 
@@ -4410,7 +4437,11 @@ function runNpcSinkOutcome(npc, killerPlayerId, sinkOpts) {
         storyOwnerId: storyOutcome !== 'none' ? missionOwner : null,
         storyOutcome,
         huntNpcName: npc.name || '',
-        victimName: npc.name || 'ship'
+        victimName: npc.name || 'ship',
+        victimFaction: npcFactionIdForPolitics(npc),
+        victimIsTrade: !!npc.isTradeShip,
+        victimIsEscort: !!wasEscortContractShip,
+        storyBounty: !!storyMission
       }));
     } catch (e) {}
     if (iKilled) checkHuntQuestOnNpcSink(npc);
@@ -8670,6 +8701,23 @@ function factionHostileToPlayer(fid) {
   const f = (fid | 0) % FACTION_COUNT;
   if (playerBannedFromFactionPort(f)) return true;
   return playerFactionRelation(f) <= COMBAT_HOSTILE_RELATION;
+}
+function playerEnsignFactionId() {
+  const aid = G.player && G.player.flagAssetId != null ? Math.floor(Number(G.player.flagAssetId)) : NaN;
+  if (!Number.isFinite(aid)) return null;
+  const ens = [10, 13, 21, 19, 16];
+  for (let fi = 0; fi < ens.length; fi++) if (ens[fi] === aid) return fi;
+  return null;
+}
+function factionPatrolMayAttackPlayer(npc) {
+  if (!npc || npc.sinking) return false;
+  const myF = (npc.factionId | 0) % FACTION_COUNT;
+  if (factionHostileToPlayer(myF)) return true;
+  const jf = G.politics && G.politics.joinedFaction != null ? (G.politics.joinedFaction | 0) % FACTION_COUNT : null;
+  if (jf != null && factionsConsideredAtWar(myF, jf)) return true;
+  const ef = playerEnsignFactionId();
+  if (ef != null && factionsConsideredAtWar(myF, ef)) return true;
+  return false;
 }
 function randomChoosableFlagRng(rng) {
   const ids = PLAYER_FLAG_CHOICE_IDS;
@@ -15708,10 +15756,14 @@ function tickBoardingEngagement(dt) {
       if (bEarly.phase === 'pull' || bEarly.phase === 'fight') {
         const lRow = G.otherPlayers.get(mergeFrom);
         if (!lRow || !lRow.boarding) {
-          G._boardingAuthMissAcc = (G._boardingAuthMissAcc || 0) + dt;
-          if (G._boardingAuthMissAcc > 3.5) {
+          if (bEarly._pvpTermSnap || bEarly.phase === 'spoils' || bEarly.phase === 'await_opponent') {
             G._boardingAuthMissAcc = 0;
-            abortActiveBoarding('Boarding line parted — lost sync with the other ship.');
+          } else {
+            G._boardingAuthMissAcc = (G._boardingAuthMissAcc || 0) + dt;
+            if (G._boardingAuthMissAcc > 8) {
+              G._boardingAuthMissAcc = 0;
+              abortActiveBoarding('Boarding line parted — lost sync with the other ship.');
+            }
           }
         } else {
           G._boardingAuthMissAcc = 0;
@@ -16826,6 +16878,18 @@ function pushPlayerOutOfShipOverlaps() {
                 applyRiggingVisualToGroup(playerShipGroup, G.player.riggingHealth);
               }
               notify(`Ram! −${Math.round(stP.dmg)} hull`);
+            }
+            const stOp = computeRamStrike(attackerStub, pPos, opType, G.player.shipType, poseOp.rotation, ov.vx, ov.vz, pv.vx, pv.vz);
+            if (stOp.dmg > 0 && ws?.readyState === 1 && oid != null) {
+              const rgOp = ramRiggingLossFromBowDot(stOp.bowDot, stOp.closing);
+              try {
+                ws.send(JSON.stringify({
+                  type: 'pvp_ram_report',
+                  targetId: oid,
+                  hull: Math.round(stOp.dmg),
+                  rigging: rgOp > 0 ? Math.round(rgOp) : 0
+                }));
+              } catch (e) {}
             }
           }
           const push = sepOp.depth * (ws && ws.readyState === 1 ? 0.29 : 0.38);
@@ -18109,6 +18173,9 @@ function updateNPCs(dt) {
           applyNpcMoveWithIslandEscape(npc, dt, sharp);
           updateNpcEscapeMode(npc, dt);
         } else {
+        const mRel = playerFactionRelation(mPfid);
+        const jf = G.politics && G.politics.joinedFaction != null ? (G.politics.joinedFaction | 0) % FACTION_COUNT : null;
+        const mWarJ = jf != null && factionsConsideredAtWar(mPfid, jf);
         if (!npc.aggro && distToPlayer < 128 && mRel > -35 && !mWarJ && !npc.isTroopTransport && npcCombatPowerEstimate(npc) < playerCombatPowerEstimate() * 0.9) {
           const dx = npc.x - G.player.x, dz = npc.z - G.player.z;
           const away = Math.atan2(dx, dz);
@@ -18276,19 +18343,24 @@ function updateNPCs(dt) {
           npc.escortRaider = false;
         }
       }
+      const distToPlayerEarly = Math.hypot(G.player.x - npc.x, G.player.z - npc.z);
+      if (npc.underPlayerFireTimer > 0 && distToPlayerEarly < 118 && !G.playerSinking && G.player.health > 0) {
+        focus = null;
+      }
       const aimx = focus ? focus.x : G.player.x;
       const aimz = focus ? focus.z : G.player.z;
       const distToTarget = Math.hypot(aimx - npc.x, aimz - npc.z);
-      const distToPlayer = Math.hypot(G.player.x - npc.x, G.player.z - npc.z);
+      const distToPlayer = distToPlayerEarly;
       ensurePolitics();
       const pirF = npc.factionId != null ? (npc.factionId | 0) % FACTION_COUNT : 0;
+      const patrolOk = npc.isFactionPatrol ? factionPatrolMayAttackPlayer(npc) : factionHostileToPlayer(pirF);
       if (npc.aggro && (G.playerSinking || G.player.health <= 0
-        || (!factionHostileToPlayer(pirF) && (npc.underPlayerFireTimer == null || npc.underPlayerFireTimer <= 0))
+        || (!patrolOk && (npc.underPlayerFireTimer == null || npc.underPlayerFireTimer <= 0))
         || (npc.underFireTimer <= 0 && (npc.underPlayerFireTimer == null || npc.underPlayerFireTimer <= 0) && distToPlayer > 280))) {
         npc.aggro = false;
       }
       if (!focus && !npc.escortRaider && !G.playerSinking && G.player.health > 0 && distToPlayer < 168) {
-        if (factionHostileToPlayer(pirF) || (npc.underPlayerFireTimer != null && npc.underPlayerFireTimer > 0)) {
+        if (patrolOk || (npc.underPlayerFireTimer != null && npc.underPlayerFireTimer > 0)) {
           npc.aggro = true;
         } else if (!npc.aggro && distToPlayer < 152 && npcCombatPowerEstimate(npc) < playerCombatPowerEstimate() * 0.92) {
           if (!(npc.tutorialRaidHull && G.tutorialRaidCutscene && G.tutorialRaidCutscene._combatPhase)) {
@@ -19088,7 +19160,7 @@ function applyAmmoHitToLocalPlayer(ammoType, shooterId, hx, hz, isPellet) {
     }
   } else if (at === 'grape') {
     if (isPellet) {
-      G.player.health = Math.max(0, G.player.health - 1.8);
+      G.player.health = Math.max(0, G.player.health - 2);
       G.player.morale = Math.max(0, G.player.morale - 1.2);
       if (!G._nextGrapePelletPopupAt) G._nextGrapePelletPopupAt = 0;
       if (G.time >= G._nextGrapePelletPopupAt) {
@@ -20041,6 +20113,12 @@ function enqueueNpcSyncMessage(msg) {
   if (isMultiplayerHost()) return;
   if (G.myId == null) return;
   if (!Array.isArray(msg.npcs)) return;
+  const stRaw = msg.srvTick;
+  if (stRaw != null && Number.isFinite(Number(stRaw))) {
+    const st = Math.floor(Number(stRaw));
+    if (G._netLastEnqueuedNpcSrvTick === st) return;
+    G._netLastEnqueuedNpcSrvTick = st;
+  }
   if (!G._pendingNpcSyncQueue) G._pendingNpcSyncQueue = [];
   G._pendingNpcSyncQueue.push(msg);
   const maxNpcQ = 28;
@@ -20894,6 +20972,27 @@ async function connectToServer() {
         applyAuthorizedNpcDamageFromPlayerShot(npc, fromId, at, isPellet, hx, hy, hz);
         break;
       }
+      case 'pvp_ram_hit': {
+        const fromId = msg.fromId != null ? Number(msg.fromId) : null;
+        if (fromId != null && Number.isFinite(fromId) && G.myId != null && Number(fromId) === Number(G.myId)) break;
+        if (G.playerSinking || G.docked || G.player.health <= 0) break;
+        const hull = Math.max(0, Math.min(40, Math.floor(Number(msg.hull) || 0)));
+        const rig = Math.max(0, Math.min(40, Math.floor(Number(msg.rigging) || 0)));
+        if (hull <= 0 && rig <= 0) break;
+        const pairKey = fromId != null ? `me${G.myId}|pl${fromId}` : `me|plram`;
+        if (!canApplyRamPair(pairKey, G.time)) break;
+        if (hull) G.player.health = Math.max(0, G.player.health - hull);
+        if (rig) {
+          G.player.riggingHealth = Math.max(0, (G.player.riggingHealth != null ? G.player.riggingHealth : 100) - rig);
+          applyRiggingVisualToGroup(playerShipGroup, G.player.riggingHealth);
+        }
+        if (hull > 0) {
+          const hHit = playerShipAudioWorldXYZ();
+          playShipDamageSound(0.82, hHit.x, hHit.y, hHit.z);
+          notify(`Rammed! −${hull} hull`);
+        }
+        break;
+      }
       case 'npc_ram_report': {
         if (!isMultiplayerHost()) break;
         const fromId = msg.fromId != null ? Number(msg.fromId) : null;
@@ -21368,6 +21467,7 @@ function updatePvpProximityFlag() {
 
 function reconcileLocalPlayerFromServerState(selfRow) {
   if (!selfRow || G.spectate || G.playerSinking || G.docked || G.captainWalk?.active || G.boarding) return;
+  if (G._respawnGraceUntil && Date.now() < G._respawnGraceUntil) return;
   const sx = Number(selfRow.x), sz = Number(selfRow.z);
   if (!Number.isFinite(sx) || !Number.isFinite(sz)) return;
   const d0 = Math.hypot(sx - G.player.x, sz - G.player.z);
@@ -21394,6 +21494,7 @@ function finalizeNetDesyncProbe(selfRow) {
       return;
     }
     if (G._wsOpenedAt && Date.now() - G._wsOpenedAt < 9000) return;
+    if (G._respawnGraceUntil && Date.now() < G._respawnGraceUntil) return;
     const sx = Number(selfRow.x), sz = Number(selfRow.z);
     const srvR = selfRow.rotation != null && Number.isFinite(Number(selfRow.rotation)) ? Number(selfRow.rotation) : G.player.rotation;
     if (!Number.isFinite(sx) || !Number.isFinite(sz) || !Number.isFinite(srvR)) return;
@@ -21410,11 +21511,11 @@ function finalizeNetDesyncProbe(selfRow) {
       return;
     }
     /* With soft client authority, normal wind/integration drift can sit ~40–120m without being “stuck”. */
-    const stalePos = rem > 200 && rem < 300;
-    const staleAng = ad > 0.52 && ad < 2.75;
+    const stalePos = rem > 270 && rem < 310;
+    const staleAng = ad > 1.15 && ad < 2.75;
     if (stalePos || staleAng) G._netDesyncSticky = (G._netDesyncSticky || 0) + 1 / NET_SYNC_HZ;
     else G._netDesyncSticky = Math.max(0, (G._netDesyncSticky || 0) - 0.22);
-    if ((G._netDesyncSticky || 0) > 5.8) {
+    if ((G._netDesyncSticky || 0) > 12) {
       setDesyncBlockingOverlay(true, 'Your ship could not stay synchronized with this realm. Reconnect or reload.');
       try { ws.close(); } catch (e) {}
     }
@@ -21523,9 +21624,6 @@ function applyNpcSyncMessage(msg, opts) {
       const aid = Number(nd.atk);
       if (npc.isTradeShip) npc.returnFireSyncId = aid;
       else npc.attackNpcSyncId = aid;
-    } else if ('atk' in nd) {
-      if (npc.isTradeShip) npc.returnFireSyncId = null;
-      else if (!npc.isStoryBounty) npc.attackNpcSyncId = null;
     }
     if (nd.sp != null && Number.isFinite(Number(nd.sp))) npc.speed = Number(nd.sp);
     if (!npc.isStoryBounty && (wasMer !== !!npc.isTradeShip || wasPat !== !!npc.isFactionPatrol)) rebuildNPCShipMesh(npc);
@@ -21614,8 +21712,7 @@ function applyNpcSyncMessage(msg, opts) {
     if (!raidHullLocal && nd.h != null && Number.isFinite(Number(nd.h))) npc.health = Math.round(Number(nd.h));
     npc.aggro = !!nd.aggro;
     if (npc.aggro) {
-      npc.underPlayerFireTimer = Math.max(npc.underPlayerFireTimer || 0, 14);
-      npc.underFireTimer = Math.max(npc.underFireTimer || 0, 14);
+      npc.underFireTimer = Math.max(npc.underFireTimer || 0, 6);
     }
     if (!raidHullLocal && nd.rg != null) npc.riggingHealth = Math.max(0, Math.min(100, nd.rg));
     if (npc.mesh) {
@@ -21890,6 +21987,12 @@ function applyWorldResumeFromServer(msg) {
     G.nearDock = null;
     G.dockingAnim = null;
     G.undockingAnim = null;
+    G._pendingResumeDock = {
+      x: Number.isFinite(Number(msg.dockX)) ? Number(msg.dockX) : G.player.x,
+      z: Number.isFinite(Number(msg.dockZ)) ? Number(msg.dockZ) : G.player.z
+    };
+  } else {
+    G._pendingResumeDock = null;
   }
   if (msg.shipType) {
     const st = String(msg.shipType).trim().slice(0, 24);
@@ -21917,7 +22020,7 @@ function applyWorldResumeFromServer(msg) {
   } catch (e) {}
   {
     const st = G.player.shipType || 'sloop';
-    if (shipFootprintOverlapsLand(G.player.x, G.player.z, G.player.rotation, st) || !hasMinClearanceFromLand(G.player.x, G.player.z, 42)) {
+    if (!G._pendingResumeDock && (shipFootprintOverlapsLand(G.player.x, G.player.z, G.player.rotation, st) || !hasMinClearanceFromLand(G.player.x, G.player.z, 42))) {
       ensurePlayerInOpenOcean();
     }
   }
@@ -32933,6 +33036,8 @@ function update(dt) {
       G.lastKillerNpcX = null;
       G.lastKillerNpcZ = null;
       applyDefaultStartingLoadout({ preserveCaptainIdentity: true });
+      G._respawnGraceUntil = Date.now() + 6000;
+      G._netDesyncSticky = 0;
       const _dOv2 = document.getElementById('death-overlay');
       if (_dOv2) _dOv2.style.display = 'none';
       notify('Respawned with a fresh crew and hold — your captain name and ship are unchanged.');
@@ -33002,6 +33107,28 @@ function update(dt) {
     }
   }
   G.nearDock = nearestDock;
+  if (G._pendingResumeDock && !G.docked && !G.playerSinking && G.mode === 'playing') {
+    const want = G._pendingResumeDock;
+    if (want.at == null) want.at = Date.now();
+    if (Date.now() - want.at > 12000) {
+      G._pendingResumeDock = null;
+    } else {
+      let resumeDock = nearestDock;
+      if (!resumeDock) {
+        let bestD = 140;
+        G.islands.forEach(isl => {
+          if (!isl.hasTown || isl.dockX == null) return;
+          const d = Math.hypot(isl.dockX - want.x, isl.dockZ - want.z);
+          if (d < bestD) { resumeDock = isl; bestD = d; }
+        });
+      }
+      if (resumeDock) {
+        G._pendingResumeDock = null;
+        G.nearDock = resumeDock;
+        try { dockAtPort(); } catch (eDock) {}
+      }
+    }
+  }
   const dockPrompt = document.getElementById('dock-prompt');
   const logPanelEl = document.getElementById('log-panel');
   const lpSt = logPanelEl ? logPanelEl.style.display : '';

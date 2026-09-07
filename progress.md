@@ -27,3 +27,40 @@ Original prompt: Using three.js as a single index.html file with amazing graphic
 - Day/night cycle
 - Sound effects and ambient ocean audio
 - Ship wake/trail particles behind moving ships
+
+---
+
+New prompt: As a single index.html file create a game that is similar to spore and the curious expedition mixed. It should be just the space stage of spore but focused around exploration and relic collection and the badges. It should be expanded upon and there should be planetary exploration that is like the curious expedition but the galaxy view and planet view should be 3d like spore. The planets and plants and buildings and everything should be procedurally generated similar to spore. Do this as a single index.html file
+
+## Relic Spiral build notes
+
+- Replaced the prior pirate game with a new single-file Three.js game in `index.html`.
+- Added procedural 3D galaxy view with star selection, ship travel, fuel costs, planet orbit displays, scanning, refueling, archive selling, and landing.
+- Added procedural 3D planet expedition view with axial hex movement, terrain costs, supplies, relic sites, ruins, hazards, supply pockets, outposts, and generated flora/buildings.
+- Added badge progression for scans, relic recovery, expedition steps, flora cataloguing, ruins, system visits, and hazards survived.
+- Added `window.render_game_to_text()` and `window.advanceTime(ms)` hooks for automated game testing.
+
+## TODOs / Suggestions for next agent
+
+- Add save/load slots using localStorage.
+- Add more ship upgrades that affect fuel, scanner range, and expedition supply cost.
+- Add animated landing and takeoff transitions between galaxy and planet view.
+
+---
+
+## 2026-09-07 networking / AI / gameplay hotfix
+
+Fixed dedicated-server and multiplayer bugs that broke combat, quests, and ship sync:
+
+- Merchant AI no longer throws on undefined `mRel`/`mWarJ` (could halt the entire NPC tick).
+- Kill awards now carry hunt name + victim faction so letters of marque, hunt contracts, and standing apply on dedicated server / non-host clients.
+- Death respawn no longer fights anticheat (server marks a respawn snap; client skips reconcile for 6s).
+- Boarding updates survive rate-limits; first grapple frame uses boarding jump limits; only the sim authority mirrors PvP boarding.
+- Server NPC AI: return fire on the shooting captain, aligned pirate/patrol hostility, `loading_home` coastal approach, NPC-vs-NPC broadside damage, unstuck/teleport, hull separation.
+- Other: `npc_sync` tick dedupe, docked reconnect restore, PvP ram reports, softer false desync overlay.
+
+## TODOs / Suggestions for next agent
+
+- Authoritative PvP cannon hits (still victim-simulated).
+- Share reef occupancy with the Node NPC sim so dedicated-server hulls cannot clip reefs.
+- Port merchant stockpile economy onto the server when `npcSimFromServer` is on.

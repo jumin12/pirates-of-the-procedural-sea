@@ -344,7 +344,27 @@ function npcShouldUseOffshoreRoutingServer(npc) {
   if (!npc) return true;
   if (!npc.isTradeShip) return true;
   const ph = npc.tradePhase || 'to_dest';
-  return ph !== 'dock_dest' && ph !== 'dock_home';
+  return ph !== 'dock_dest' && ph !== 'dock_home' && ph !== 'loading_home';
+}
+
+function npcKillAwardMeta(npc) {
+  const victimName = npc && npc.name ? String(npc.name) : 'ship';
+  let victimFaction = null;
+  if (npc) {
+    if (npc.homeFaction != null && Number.isFinite(Number(npc.homeFaction))) {
+      victimFaction = (npc.homeFaction | 0) % FACTION_COUNT;
+    } else if (npc.factionId != null && Number.isFinite(Number(npc.factionId))) {
+      victimFaction = (npc.factionId | 0) % FACTION_COUNT;
+    }
+  }
+  return {
+    huntNpcName: victimName,
+    victimName,
+    victimFaction,
+    victimIsTrade: !!(npc && npc.isTradeShip),
+    victimIsEscort: !!(npc && npc.isEscortCargo),
+    storyBounty: !!(npc && npc.isStoryBounty)
+  };
 }
 
 function npcLooseCoastalRoom(x, z, dryLand) {
@@ -459,7 +479,46 @@ function nudgeNpcOffIsland(npc, dryLand, edgeClamp) {
   npc.z = Math.max(-edgeClamp, Math.min(edgeClamp, npc.z * 0.92));
 }
 
+function teleportNpcTowardOpenWater(npc, dryLand, edgeClamp) {
+  let bestA = null;
+  let best = -1;
+  for (let i = 0; i < 28; i++) {
+    const ang = (i / 28) * Math.PI * 2;
+    let ok = 0;
+    for (let s = 1; s <= 8; s++) {
+      const tx = npc.x + Math.sin(ang) * 38 * s;
+      const tz = npc.z + Math.cos(ang) * 38 * s;
+      if (Math.abs(tx) > edgeClamp || Math.abs(tz) > edgeClamp) break;
+      if (!dryLand(tx, tz)) ok++;
+      else break;
+    }
+    if (ok > best) {
+      best = ok;
+      bestA = ang;
+    }
+  }
+  if (best >= 2 && bestA != null) {
+    npc.x += Math.sin(bestA) * 46;
+    npc.z += Math.cos(bestA) * 46;
+    npc.rotation = bestA;
+    npc.wanderAngle = bestA;
+    npc.escapeMode = false;
+    npc.escapeTimer = 0;
+    npc.stuckAcc = 0;
+    return;
+  }
+  nudgeNpcOffIsland(npc, dryLand, edgeClamp);
+}
+
 function applyNpcMoveWithIslandEscape(npc, dt, sharp, windAt, dryLand, edgeClamp) {
+  if (npc.escapeMode) {
+    npc.escapeTimer = (npc.escapeTimer || 0) + dt;
+    if (npc.escapeTimer > 9) {
+      npc.escapeMode = false;
+      npc.escapeTimer = 0;
+      npc.stuckAcc = 0;
+    }
+  }
   if (npcShouldUseOffshoreRoutingServer(npc) && !npcLooseCoastalRoom(npc.x, npc.z, dryLand)) {
     steerNpcClearanceAhead(npc, dt, sharp, windAt, dryLand);
   }
@@ -469,8 +528,10 @@ function applyNpcMoveWithIslandEscape(npc, dt, sharp, windAt, dryLand, edgeClamp
   if (!dryLand(nx, nz)) {
     npc.x = nx;
     npc.z = nz;
+    npc.stuckAcc = Math.max(0, (npc.stuckAcc || 0) - dt * 0.85);
     return;
   }
+  npc.stuckAcc = (npc.stuckAcc || 0) + dt;
   steerNpcClearanceAhead(npc, dt, sharp, windAt, dryLand);
   const eff2 = npcEffectiveForwardSpeed(npc, windAt);
   const nx2 = npc.x + Math.sin(npc.rotation) * eff2 * dt * 0.35;
@@ -480,6 +541,17 @@ function applyNpcMoveWithIslandEscape(npc, dt, sharp, windAt, dryLand, edgeClamp
     npc.z = nz2;
   } else {
     nudgeNpcOffIsland(npc, dryLand, edgeClamp);
+  }
+  if (!npc.escapeMode && npc.stuckAcc > 0.55) {
+    npc.rotation += Math.PI;
+    while (npc.rotation > Math.PI) npc.rotation -= Math.PI * 2;
+    while (npc.rotation < -Math.PI) npc.rotation += Math.PI * 2;
+    npc.wanderAngle = npc.rotation;
+    npc.escapeMode = true;
+    npc.escapeTimer = 0;
+    npc.stuckAcc = 0;
+  } else if (npc.stuckAcc > 2.8) {
+    teleportNpcTowardOpenWater(npc, dryLand, edgeClamp);
   }
 }
 
@@ -548,7 +620,25 @@ function npcBroadsideFireSide(normRel, tolRad) {
   return normRel >= 0 ? 1 : -1;
 }
 
-function emitBroadside(broadcastAll, npc, targetX, targetZ, tvx, tvz) {
+function applyNpcVolleyHitOnNpc(shooter, target, shots) {
+  if (!shooter || !target || target.sinking || target === shooter) return;
+  const h0 = target.health != null && Number.isFinite(Number(target.health)) ? Number(target.health) : 72;
+  if (h0 <= 0) return;
+  const n = Math.max(1, Math.min(8, shots | 0));
+  const dh = n * (7 + Math.floor(Math.random() * 5));
+  target.health = h0 - dh;
+  target.aggro = true;
+  target.underFireTimer = Math.max(target.underFireTimer || 0, 8);
+  if (target.isTradeShip || !target.isStoryBounty) target.returnFireSyncId = shooter.syncId;
+  if (target.health <= 0) {
+    target.health = 0;
+    target.speed = 0;
+    target.sinking = true;
+    target.sinkTimer = 0;
+  }
+}
+
+function emitBroadside(broadcastAll, npc, targetX, targetZ, tvx, tvz, targetNpc) {
   const npcSpec = SHIP_TYPES[npc.type] || SHIP_TYPES.sloop;
   const cc = Math.max(1, npcSpec.cannonSlots || 2);
   const perSide = Math.ceil(cc / 2);
@@ -565,12 +655,12 @@ function emitBroadside(broadcastAll, npc, targetX, targetZ, tvx, tvz) {
   const dx = px - npc.x;
   const dz = pz - npc.z;
   const dist = Math.hypot(dx, dz);
-  if (dist > 78 || dist < 2) return;
+  if (dist > 78 || dist < 2) return 0;
   const toTargetAngle = Math.atan2(dx, dz);
   const relAngle = toTargetAngle - npc.rotation;
   const normRel = ((relAngle % (Math.PI * 2)) + Math.PI * 3) % (Math.PI * 2) - Math.PI;
   const side = npcBroadsideFireSide(normRel, 0.38);
-  if (side === 0) return;
+  if (side === 0) return 0;
 
   const sinR = Math.sin(npc.rotation);
   const cosR = Math.cos(npc.rotation);
@@ -580,9 +670,11 @@ function emitBroadside(broadcastAll, npc, targetX, targetZ, tvx, tvz) {
   const nVelX = Math.sin(npc.rotation) * (npc.speed || 0);
   const nVelZ = Math.cos(npc.rotation) * (npc.speed || 0);
   const fallbackY = 1.85;
+  let shots = 0;
 
   for (let g = 0; g < perSide; g++) {
     if (Math.random() < 0.14) continue;
+    shots++;
     const jitter = (Math.random() - 0.5) * 0.62;
     const wide = (Math.random() - 0.5) * (0.38 + Math.random() * 0.35);
     const ang = jitter + wide;
@@ -603,6 +695,8 @@ function emitBroadside(broadcastAll, npc, targetX, targetZ, tvx, tvz) {
       broadcastAll({ type: 'cannon_fx', x: wx, y: wy, z: wz, dx: dirX, dz: dirZ });
     } catch (e) {}
   }
+  if (shots > 0 && targetNpc) applyNpcVolleyHitOnNpc(npc, targetNpc, shots);
+  return shots;
 }
 
 const STORY_SHIP_ORDER = ['cutter', 'sloop', 'brigantine', 'galleon', 'warship'];
@@ -960,12 +1054,17 @@ function applyPlayerCannonHitAuthoritative(npcs, fromPlayerId, npcSyncId, ammoTy
     }
     const goldLoot = storyMission ? 0 : 30;
     const sinksAi = !storyMission && pid != null ? 1 : 0;
+    const meta = npcKillAwardMeta(npc);
     out.award = {
       killerId: pid,
       gold: goldLoot,
       sinksAi,
-      huntNpcName: '',
-      victimName,
+      huntNpcName: meta.huntNpcName,
+      victimName: meta.victimName || victimName,
+      victimFaction: meta.victimFaction,
+      victimIsTrade: meta.victimIsTrade,
+      victimIsEscort: meta.victimIsEscort,
+      storyBounty: meta.storyBounty,
       storyOwnerId: storyMission ? missionOwner : null,
       storyOutcome
     };
@@ -1009,12 +1108,17 @@ function applyBoardingScuttleAuthoritative(npcs, fromPlayerId, npcSyncId, player
   }
   const goldLoot = storyMission ? 0 : 30;
   const sinksAi = !storyMission ? 1 : 0;
+  const meta = npcKillAwardMeta(npc);
   out.award = {
     killerId: pid,
     gold: goldLoot,
     sinksAi,
-    huntNpcName: '',
-    victimName,
+    huntNpcName: meta.huntNpcName,
+    victimName: meta.victimName || victimName,
+    victimFaction: meta.victimFaction,
+    victimIsTrade: meta.victimIsTrade,
+    victimIsEscort: meta.victimIsEscort,
+    storyBounty: meta.storyBounty,
     storyOwnerId: storyMission ? missionOwner : null,
     storyOutcome
   };
@@ -1384,7 +1488,7 @@ function createServerNpcWorld(opts) {
     npc._huntAcc = 0;
     const myF = (npc.factionId | 0) % FACTION_COUNT;
     const near = nearestCaptain(npc.x, npc.z, players);
-    if (near && near.d < 95 && npc.aggro) return;
+    if (near && near.d < 62 && npc.aggro) return;
     if (npc.attackNpcSyncId != null) {
       const prey = npcs.find(n => n.syncId === npc.attackNpcSyncId && !n.sinking && (n.health == null || n.health > 0));
       if (prey && Math.hypot(prey.x - npc.x, prey.z - npc.z) < 620) return;
@@ -1497,6 +1601,7 @@ function createServerNpcWorld(opts) {
     if (!npc.fireCooldown) npc.fireCooldown = 0;
     npc.fireCooldown -= dt;
     if (npc.underFireTimer > 0) npc.underFireTimer -= dt;
+    if (npc.underPlayerFireTimer > 0) npc.underPlayerFireTimer -= dt;
     updateMerchantThreat(npc);
     let atkShip = npc.returnFireSyncId != null ? npcs.find(n => n.syncId === npc.returnFireSyncId && !n.sinking && (n.health == null || n.health > 0)) : null;
     if (atkShip) {
@@ -1543,7 +1648,7 @@ function createServerNpcWorld(opts) {
         if (npc.fireCooldown <= 0 && distAtk < 74) {
           const tvx = Math.sin(atkShip.rotation) * (atkShip.speed || 0);
           const tvz = Math.cos(atkShip.rotation) * (atkShip.speed || 0);
-          emitBroadside(broadcastAll, npc, atkShip.x, atkShip.z, tvx, tvz);
+          emitBroadside(broadcastAll, npc, atkShip.x, atkShip.z, tvx, tvz, atkShip);
           npc.fireCooldown = PLAYER_BROADSIDE_COOLDOWN;
         }
       }
@@ -1666,8 +1771,12 @@ function createServerNpcWorld(opts) {
           const dz = dockTz - npc.z;
           const d = Math.hypot(dx, dz) || 0.01;
           const step = Math.min(10 * dt, d);
-          npc.x += (dx / d) * step;
-          npc.z += (dz / d) * step;
+          const nx = npc.x + (dx / d) * step;
+          const nz = npc.z + (dz / d) * step;
+          if (!dryLand(nx, nz)) {
+            npc.x = nx;
+            npc.z = nz;
+          }
           npc.rotation = Math.atan2(dx, dz);
         }
         if (npc.tradeTimer <= 0) {
@@ -1706,6 +1815,8 @@ function createServerNpcWorld(opts) {
     if (!npc.fireCooldown) npc.fireCooldown = 0;
     npc.fireCooldown -= dt;
     if (npc.underFireTimer > 0) npc.underFireTimer -= dt;
+    if (npc.underPlayerFireTimer > 0) npc.underPlayerFireTimer -= dt;
+    if (npc.underPlayerFireTimer <= 0) npc._humanAttackerId = null;
     if (isPatrol) updateHuntAi(npc, true, players);
     else updateHuntAi(npc, false, players);
     let focus = null;
@@ -1721,17 +1832,28 @@ function createServerNpcWorld(opts) {
       focus = npcs.find(n => n.syncId === npc.attackNpcSyncId && !n.sinking && (n.health == null || n.health > 0));
       if (!focus) npc.attackNpcSyncId = null;
     }
-    const near = nearestCaptain(npc.x, npc.z, players);
+    let near = nearestCaptain(npc.x, npc.z, players);
+    if (npc._humanAttackerId != null && players instanceof Map) {
+      const grudge = players.get(Math.floor(Number(npc._humanAttackerId)));
+      if (grudge && !grudge.docked) {
+        const gd = Math.hypot((grudge.x || 0) - npc.x, (grudge.z || 0) - npc.z);
+        if (gd < 220) near = { p: grudge, d: gd };
+      }
+    }
     const distToPlayer = near ? near.d : 1e9;
+    if (npc.underPlayerFireTimer > 0 && distToPlayer < 118 && near) {
+      focus = null;
+    }
     const aimx = focus ? focus.x : near ? near.p.x : 0;
     const aimz = focus ? focus.z : near ? near.p.z : 0;
     const distToTarget = focus ? Math.hypot(focus.x - npc.x, focus.z - npc.z) : distToPlayer;
     const nid = near && near.p && near.p.id != null ? Math.floor(Number(near.p.id)) : null;
     if (!focus && near && nid != null && distToPlayer < 118) {
-      const underAttack = npc.underFireTimer != null && npc.underFireTimer > 0.05;
-      const pirateFreeForAll = !isPatrol;
+      const underAttack = (npc.underFireTimer != null && npc.underFireTimer > 0.05)
+        || (npc.underPlayerFireTimer != null && npc.underPlayerFireTimer > 0.05);
+      const pirateOk = !isPatrol && (underAttack || hostileStandingToFaction(nid, (npc.factionId | 0) % FACTION_COUNT));
       const patrolOk = isPatrol ? factionPatrolMayAttackPlayer(npc, nid, near.p) : false;
-      if (underAttack || pirateFreeForAll || patrolOk) {
+      if (underAttack || pirateOk || patrolOk) {
         npc.aggro = true;
         npc.underFireTimer = Math.max(npc.underFireTimer || 0, 2.9);
       }
@@ -1759,7 +1881,7 @@ function createServerNpcWorld(opts) {
         if (npc.fireCooldown <= 0 && distToTarget < 74) {
           const tvx = Math.sin(focus.rotation) * (focus.speed || 0);
           const tvz = Math.cos(focus.rotation) * (focus.speed || 0);
-          emitBroadside(broadcastAll, npc, focus.x, focus.z, tvx, tvz);
+          emitBroadside(broadcastAll, npc, focus.x, focus.z, tvx, tvz, focus);
           npc.fireCooldown = PLAYER_BROADSIDE_COOLDOWN;
         }
       } else if (npc.aggro && near && distToPlayer < 110) {
@@ -1835,6 +1957,32 @@ function createServerNpcWorld(opts) {
       if (npc.health != null && npc.health <= 0) continue;
       if (npc.isTradeShip) stepMerchant(npc, dt, playerMap);
       else stepCombatNpc(npc, dt, playerMap, !!npc.isFactionPatrol);
+    }
+    for (let i = 0; i < npcs.length; i++) {
+      const a = npcs[i];
+      if (!a || a.sinking || a._boardLock) continue;
+      for (let j = i + 1; j < npcs.length; j++) {
+        const b = npcs[j];
+        if (!b || b.sinking || b._boardLock) continue;
+        const dx = b.x - a.x;
+        const dz = b.z - a.z;
+        const d2 = dx * dx + dz * dz;
+        if (d2 > 26 * 26 || d2 < 1e-6) continue;
+        const d = Math.sqrt(d2);
+        const need = 11.5;
+        if (d >= need) continue;
+        const nx = dx / d;
+        const nz = dz / d;
+        const push = (need - d) * 0.35;
+        if (!dryLand(a.x - nx * push, a.z - nz * push)) {
+          a.x -= nx * push;
+          a.z -= nz * push;
+        }
+        if (!dryLand(b.x + nx * push, b.z + nz * push)) {
+          b.x += nx * push;
+          b.z += nz * push;
+        }
+      }
     }
     npcs = npcs.filter(n => {
       const h = n.health != null && Number.isFinite(Number(n.health)) ? Number(n.health) : 0;

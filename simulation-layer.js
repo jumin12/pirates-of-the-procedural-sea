@@ -349,14 +349,17 @@ function createAntiCheatGate(overrides = {}, hooks = {}) {
       }
     }
 
-    const inBoarding = !!(p.boarding && typeof p.boarding === 'object');
+    const inBoarding = !!(p.boarding && typeof p.boarding === 'object')
+      || (msg.boarding != null && typeof msg.boarding === 'object');
+    const deathRespawn = !!(ws && ws._acDeathRespawnPending)
+      || (p.health != null && Number(p.health) <= 0 && msg.health != null && Number(msg.health) > 40);
 
     if (msg.health !== undefined) {
       const h = Number(msg.health);
       if (Number.isFinite(h)) {
         const prev = p.health != null && Number.isFinite(Number(p.health)) ? Number(p.health) : 100;
         const maxDrop = inBoarding ? 80 : cfg.maxHealthDropPerMsg;
-        const maxGain = inBoarding ? 60 : 18;
+        const maxGain = deathRespawn ? 120 : (inBoarding ? 60 : 18);
         let nh = h;
         if (h < prev - maxDrop) {
           nh = prev - maxDrop;
@@ -382,8 +385,8 @@ function createAntiCheatGate(overrides = {}, hooks = {}) {
           stripped.push('rigging');
           kick = bumpViolation(ws, 'rigging') || kick;
         }
-        if (rg > prev + 20) {
-          nr = Math.min(100, prev + 20);
+        if (rg > prev + (deathRespawn ? 100 : 20)) {
+          nr = Math.min(100, prev + (deathRespawn ? 100 : 20));
           stripped.push('rigging_gain');
         }
         p.riggingHealth = Math.max(0, Math.min(100, nr));
@@ -414,6 +417,7 @@ function createAntiCheatGate(overrides = {}, hooks = {}) {
         const d = Math.hypot(cx - p.x, cz - p.z);
         let maxJump = cfg.maxPositionJump;
         if (inBoarding) maxJump = Math.max(maxJump, 96);
+        else if (deathRespawn) maxJump = Math.max(maxJump, 900);
         else if (p.speed != null && Number.isFinite(Number(p.speed))) {
           const sp = Math.abs(Number(p.speed));
           maxJump = Math.min(52, maxJump + sp * 0.95);
@@ -422,7 +426,18 @@ function createAntiCheatGate(overrides = {}, hooks = {}) {
           /* First huge delta after connect: client continued voyage / reconnect at saved coords while
            * server still has offshore spawn — snap once instead of denying hints and racking up kicks. */
           const maxResumeSnap = 720000;
-          if (!ws._acResumePositionTrusted && clampResumeXZ && d <= maxResumeSnap) {
+          if (deathRespawn && clampResumeXZ && d <= 1400) {
+            const c = clampResumeXZ(cx, cz);
+            if (c && Number.isFinite(c.x) && Number.isFinite(c.z)) {
+              if (ws) ws._acDeathRespawnPending = false;
+              p.x = c.x;
+              p.z = c.z;
+              stripped.push('position_respawn_snap');
+            } else {
+              stripped.push('position');
+              denyPositionHint = true;
+            }
+          } else if (!ws._acResumePositionTrusted && clampResumeXZ && d <= maxResumeSnap) {
             const c = clampResumeXZ(cx, cz);
             if (c && Number.isFinite(c.x) && Number.isFinite(c.z)) {
               ws._acResumePositionTrusted = true;

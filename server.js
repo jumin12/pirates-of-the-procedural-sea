@@ -239,6 +239,10 @@ function mirrorPvPBoardingToPartner(fromId, s) {
   if (!s || typeof s !== 'object') return;
   const mate = Math.floor(Number(s.sid));
   if (!Number.isFinite(mate) || mate <= 0 || mate === fromId || !players.has(mate)) return;
+  const auth = s.at != null && Number.isFinite(Number(s.at))
+    ? Math.floor(Number(s.at))
+    : Math.min(fromId, mate);
+  if (fromId !== auth) return;
   players.get(mate).boarding = Object.assign({}, s, { sid: fromId });
 }
 
@@ -2301,15 +2305,21 @@ function applyServerAuthoritativeNpcKillAward(award) {
     saveLeaderboard();
     broadcast({ type: 'leaderboard', entries: leaderboardHistory });
   }
-  broadcastAll({
+  const awardPayload = {
     type: 'npc_kill_award',
     killerId,
     gold: dg,
     sinksAi: dAi,
-    storyBounty: false,
+    storyBounty: !!award.storyBounty,
     huntNpcName,
-    victimName: award.victimName != null ? String(award.victimName).slice(0, 48) : 'ship'
-  });
+    victimName: award.victimName != null ? String(award.victimName).slice(0, 48) : 'ship',
+    victimIsTrade: !!award.victimIsTrade,
+    victimIsEscort: !!award.victimIsEscort
+  };
+  if (award.victimFaction != null && Number.isFinite(Number(award.victimFaction))) {
+    awardPayload.victimFaction = (Number(award.victimFaction) | 0) % 5;
+  }
+  broadcastAll(awardPayload);
 }
 
 function clearCaptainSocketSlot(ws) {
@@ -2610,7 +2620,26 @@ wss.on('connection', (ws, req) => {
           const navTok = msg.navigatorToken != null ? String(msg.navigatorToken).trim().slice(0, 128) : '';
           p.navigatorAcBypass = !!(navTok && adminSessions.get(navTok) > Date.now());
           const allowNet = p.navigatorAcBypass || antiCheat.allowUpdateMessage(ws);
-          if (!allowNet) break;
+          if (!allowNet) {
+            if (msg.boarding !== undefined) {
+              if (msg.boarding === null) {
+                clearPairedPvPBoarding(id, p.boarding);
+                p.boarding = null;
+              } else {
+                const sCrit = sanitizeBoardingFromClient(msg.boarding);
+                if (sCrit != null) {
+                  p.boarding = sCrit;
+                  if (Math.floor(Number(sCrit.sid)) > 0) mirrorPvPBoardingToPartner(id, sCrit);
+                }
+              }
+              if (msg.health !== undefined) {
+                const hCrit = Number(msg.health);
+                if (Number.isFinite(hCrit)) p.health = Math.max(-20, Math.min(9999, hCrit));
+              }
+              if (msg.crewData && Array.isArray(msg.crewData)) p.crewData = msg.crewData.slice(0, 32);
+            }
+            break;
+          }
           if (msg.seq != null && Number.isFinite(Number(msg.seq))) {
             const ns = Math.floor(Number(msg.seq));
             if (ns > 0) p.lastNetSeq = ns;
@@ -2646,8 +2675,6 @@ wss.on('connection', (ws, req) => {
               p.dockBerthIndex = Number.isFinite(bi) ? bi : null;
             }
           }
-          if (msg.riggingHealth !== undefined) p.riggingHealth = Math.max(0, Math.min(100, Number(msg.riggingHealth) || 0));
-          if (msg.morale !== undefined) p.morale = Math.max(0, Math.min(100, Number(msg.morale) || 0));
           if (msg.shipType !== undefined && msg.shipType !== null) {
             const st = String(msg.shipType).trim().slice(0, 24);
             if (st) p.shipType = st;
@@ -3039,6 +3066,24 @@ wss.on('connection', (ws, req) => {
           });
           break;
         }
+        case 'pvp_ram_report': {
+          const tid = Math.floor(Number(msg.targetId));
+          const hullP = Math.max(0, Math.min(40, Math.floor(Number(msg.hull) || 0)));
+          const rigP = Math.max(0, Math.min(40, Math.floor(Number(msg.rigging) || 0)));
+          if (!Number.isFinite(tid) || tid === id || !players.has(tid)) break;
+          if (hullP === 0 && rigP === 0) break;
+          const atkP = players.get(id);
+          const vicP = players.get(tid);
+          if (!atkP || !vicP || atkP.docked || vicP.docked) break;
+          const ramD = Math.hypot((atkP.x || 0) - (vicP.x || 0), (atkP.z || 0) - (vicP.z || 0));
+          if (ramD > 90) break;
+          vicP.health = Math.max(0, (vicP.health != null ? Number(vicP.health) : 100) - hullP);
+          if (rigP) {
+            vicP.riggingHealth = Math.max(0, (vicP.riggingHealth != null ? Number(vicP.riggingHealth) : 100) - rigP);
+          }
+          sendToPlayerId(tid, { type: 'pvp_ram_hit', fromId: id, hull: hullP, rigging: rigP });
+          break;
+        }
         case 'npc_hit_claim': {
           if (msg.npcId === undefined || msg.npcId === null) break;
           const a = msg.ammoType;
@@ -3182,6 +3227,14 @@ wss.on('connection', (ws, req) => {
             id: nextLootNetId++
           }));
           const _v = players.get(victimId);
+          if (_v) {
+            _v.health = 0;
+            if (_v.boarding) {
+              clearPairedPvPBoarding(victimId, _v.boarding);
+              _v.boarding = null;
+            }
+            ws._acDeathRespawnPending = true;
+          }
           let _sinkName = _v?.name || msg.name || 'Unknown';
           if (_v?.crewData && Array.isArray(_v.crewData) && _v.crewData[0]?.name) {
             _sinkName = String(_v.crewData[0].name).slice(0, 28);
@@ -3507,6 +3560,10 @@ wss.on('connection', (ws, req) => {
             sinksAi: msg.sinksAi,
             huntNpcName: msg.huntNpcName,
             victimName: msg.victimName,
+            victimFaction: msg.victimFaction,
+            victimIsTrade: !!msg.victimIsTrade,
+            victimIsEscort: !!msg.victimIsEscort,
+            storyBounty: !!msg.storyBounty,
             storyOwnerId: msg.storyOwnerId,
             storyOutcome: msg.storyOutcome
           });
