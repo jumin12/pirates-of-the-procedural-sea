@@ -77,7 +77,7 @@ function applyNavigatorDevPlayerUpdate(p, msg) {
 }
 
 /** Per-client interest radius (world units). Larger default keeps allied captains mutual visibility stable vs npc_sync broadcast (bandwidth still AOI-scoped vs full roster). Override STATE_AOI_RADIUS to tune. */
-const STATE_AOI_RADIUS = Math.max(800, Math.min(20000, Number(process.env.STATE_AOI_RADIUS) || 7800));
+const STATE_AOI_RADIUS = Math.max(800, Math.min(20000, Number(process.env.STATE_AOI_RADIUS) || 3200));
 const STATE_AOI_RADIUS_SQ = STATE_AOI_RADIUS * STATE_AOI_RADIUS;
 
 /** Dedicated VM / process managers / horizontal realms: see docs/MULTIPLAYER-DEPLOYMENT.md and multiplayer-server.example.env (not geographic multi-region). */
@@ -117,6 +117,21 @@ function ensureNpcWorld() {
       getPlayerStanding: (pid) => ensureWorldPolitics().getPlayerStanding(pid),
       onTownCargo: (kind, key, good, amt, cx, cz) => {
         try { ensureWorldPolitics().applyTownCargo(kind, key, good, amt, cx, cz); } catch (e) {}
+      },
+      onTroopLanding: (key, destFac, atkFac, troops, gold) => {
+        try {
+          if (!ensureWorldPolitics().applyTroopLanding(key, destFac, atkFac, troops, gold)) return;
+          const wp = ensureWorldPolitics().snapshot();
+          broadcastAll({
+            type: 'politics_snap',
+            matrix: wp.matrix,
+            fw: wp.factionWealth,
+            pc: wp.portController,
+            inf: wp.inflation,
+            pg: wp.portGarrison,
+            ts: wp.townStockpiles
+          });
+        } catch (e) {}
       }
     });
     npcWorld.setBroadcastAll(broadcastAll);
@@ -138,6 +153,72 @@ function playerIncludedInSnapshot(viewer, target, aoiSq) {
   const dx = target.x - viewer.x;
   const dz = target.z - viewer.z;
   return dx * dx + dz * dz <= aoiSq;
+}
+
+/** Client `DOCK_TRIGGER_RADIUS` (42) + 8 — both hulls in this band = harbor PvP truce. */
+const HARBOR_PVP_TRUCE_RADIUS = 50;
+let harborPortsCache = null;
+let harborPortsCacheKey = null;
+function getHarborPorts() {
+  const key = `${WORLD_SEED >>> 0}:${WORLD_MAP_REVISION >>> 0}`;
+  if (harborPortsCache && harborPortsCacheKey === key) return harborPortsCache;
+  try {
+    const ctx = createTerrainContext({
+      worldSeed: WORLD_SEED >>> 0,
+      edgeClamp: PLAYER_WORLD_EDGE_CLAMP,
+      worldMapPayload: currentWorldMapPayloadOrNull()
+    });
+    harborPortsCache = ctx.collectAllTradingPorts() || [];
+  } catch (e) {
+    harborPortsCache = [];
+  }
+  harborPortsCacheKey = key;
+  return harborPortsCache;
+}
+function playerInHarborZone(x, z) {
+  const ports = getHarborPorts();
+  for (let i = 0; i < ports.length; i++) {
+    const p = ports[i];
+    if (!p || p.dockX == null || p.dockZ == null) continue;
+    if (Math.hypot(Number(x) - Number(p.dockX), Number(z) - Number(p.dockZ)) <= HARBOR_PVP_TRUCE_RADIUS) return true;
+  }
+  return false;
+}
+function harborPvpTruceBetween(a, b) {
+  if (!a || !b) return false;
+  return playerInHarborZone(a.x, a.z) && playerInHarborZone(b.x, b.z);
+}
+
+function recordPlayerPosHist(p) {
+  if (!p) return;
+  if (!Array.isArray(p._posHist)) p._posHist = [];
+  const t = Date.now();
+  const last = p._posHist[p._posHist.length - 1];
+  if (last && t - last.t < 8) {
+    last.x = p.x;
+    last.z = p.z;
+    last.t = t;
+    return;
+  }
+  p._posHist.push({ t, x: p.x, z: p.z });
+  if (p._posHist.length > 28) p._posHist.shift();
+}
+function rewindPlayerXZ(p, agoMs) {
+  const hist = p && p._posHist;
+  if (!hist || !hist.length) return { x: p.x, z: p.z };
+  const want = Date.now() - Math.max(0, Number(agoMs) || 0);
+  let best = hist[0];
+  for (let i = 1; i < hist.length; i++) {
+    if (hist[i].t <= want) best = hist[i];
+    else {
+      const a = best;
+      const b = hist[i];
+      const span = Math.max(1, b.t - a.t);
+      const u = Math.max(0, Math.min(1, (want - a.t) / span));
+      return { x: a.x + (b.x - a.x) * u, z: a.z + (b.z - a.z) * u };
+    }
+  }
+  return { x: best.x, z: best.z };
 }
 
 function buildStateRow(p, includeCrew) {
@@ -1957,7 +2038,13 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  const reqPath = String(req.url || '').split('?')[0];
+  let reqPath = String(req.url || '').split('?')[0];
+  try { reqPath = decodeURIComponent(reqPath); } catch (eDec) {}
+  if (reqPath.includes('\0')) {
+    res.writeHead(400, { 'Content-Type': 'text/plain', ...CORS_HEADERS });
+    res.end('Bad path');
+    return;
+  }
 
   if (req.method === 'POST' && reqPath === '/api/navigator-auth') {
     readJsonBody(req).then(body => {
@@ -2666,6 +2753,7 @@ wss.on('connection', (ws, req) => {
             const cz = Number(msg.z);
             if (Number.isFinite(cx) && Number.isFinite(cz) && (p.docked || !ac.denyPositionHint)) {
               gameSim.applyClientPositionHint(p, cx, cz);
+              recordPlayerPosHist(p);
             }
           }
           if (msg.docked !== undefined) p.docked = !!msg.docked;
@@ -3008,8 +3096,14 @@ wss.on('connection', (ws, req) => {
           const atk = players.get(id);
           const vic = players.get(tid);
           if (!atk || !vic || atk.docked || vic.docked) break;
-          const dHit = Math.hypot((atk.x || 0) - (vic.x || 0), (atk.z || 0) - (vic.z || 0));
-          if (dHit > 280) break;
+          if (harborPvpTruceBetween(atk, vic)) break;
+          const rtt = Math.max(0, Number(atk.rtt) || 0);
+          const rewindMs = Math.min(280, rtt * 0.55);
+          const vicPos = rewindPlayerXZ(vic, rewindMs);
+          const atkPos = rewindPlayerXZ(atk, Math.min(80, rtt * 0.15));
+          const dHit = Math.hypot((atkPos.x || 0) - (vicPos.x || 0), (atkPos.z || 0) - (vicPos.z || 0));
+          const maxR = 280 + Math.min(120, rtt * 0.18);
+          if (dHit > maxR) break;
           const aRaw = msg.ammoType;
           const isPellet = msg.isPellet === true || aRaw === 'grape_pellet';
           const ammoType = isPellet ? 'grape' : (aRaw === 'grape' || aRaw === 'chain' ? aRaw : 'ball');
@@ -3117,6 +3211,7 @@ wss.on('connection', (ws, req) => {
           const atkP = players.get(id);
           const vicP = players.get(tid);
           if (!atkP || !vicP || atkP.docked || vicP.docked) break;
+          if (harborPvpTruceBetween(atkP, vicP)) break;
           const ramD = Math.hypot((atkP.x || 0) - (vicP.x || 0), (atkP.z || 0) - (vicP.z || 0));
           if (ramD > 90) break;
           vicP.health = Math.max(0, (vicP.health != null ? Number(vicP.health) : 100) - hullP);
@@ -4323,6 +4418,7 @@ setInterval(() => {
   serverStateTickSeq++;
   ensureSimulationLayer();
   gameSim.stepAll(players);
+  for (const p of players.values()) recordPlayerPosHist(p);
   ensureNpcWorld();
   if (!npcWorldHadPlayers) {
     npcWorld.setWorldSeed(WORLD_SEED >>> 0);
@@ -4339,12 +4435,14 @@ setInterval(() => {
     }
   } catch (eTs) {}
   try {
-    broadcastGameplayJsonGlobal({
-      type: 'npc_sync',
-      npcs: npcWorld.buildSyncRows(),
-      wind: npcWorld.getWindSample(),
-      srvTick: serverStateTickSeq
-    });
+    if (serverStateTickSeq % 3 === 0) {
+      broadcastGameplayJsonGlobal({
+        type: 'npc_sync',
+        npcs: npcWorld.buildSyncRows(),
+        wind: npcWorld.getWindSample(),
+        srvTick: serverStateTickSeq
+      });
+    }
   } catch (e) {}
   if (serverStateTickSeq % 540 === 0) {
     try {

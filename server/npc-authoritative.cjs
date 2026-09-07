@@ -152,8 +152,12 @@ function portStockKey(meta) {
 
 function townFaction(meta, portController, ws) {
   if (!meta || !meta.hasTown) return 0;
+  const kStock = portStockKey(meta);
   const k = `${meta.cx},${meta.cz}`;
-  if (portController && portController[k] != null) return (portController[k] | 0) % FACTION_COUNT;
+  if (portController) {
+    if (portController[kStock] != null) return (portController[kStock] | 0) % FACTION_COUNT;
+    if (portController[k] != null) return (portController[k] | 0) % FACTION_COUNT;
+  }
   return meta.faction != null ? (meta.faction | 0) % FACTION_COUNT : (((meta.cx * 7919 ^ meta.cz * 9341 ^ (ws >>> 0)) >>> 0) % FACTION_COUNT);
 }
 
@@ -188,6 +192,7 @@ function assignTradeRouteFromHome(npc, homeMeta, list, rng, ws, portController) 
   npc.homeDockZ = homeMeta.dockZ;
   npc.homeCx = homeMeta.cx;
   npc.homeCz = homeMeta.cz;
+  npc.homeCustomTownId = homeMeta.customTownId != null ? homeMeta.customTownId : null;
   npc.cargoGood = portExportsGood(homeMeta, ws);
   let dest = pickTradeDestination(homeMeta, list, rng, ws, portController);
   if (!dest) {
@@ -197,6 +202,7 @@ function assignTradeRouteFromHome(npc, homeMeta, list, rng, ws, portController) 
   if (!dest) return;
   npc.destCx = dest.cx;
   npc.destCz = dest.cz;
+  npc.destCustomTownId = dest.customTownId != null ? dest.customTownId : null;
   npc.tradeDestX = dest.dockX;
   npc.tradeDestZ = dest.dockZ;
   npc.cargoUnits = 10 + ((Math.floor(rng() * 10) | 0));
@@ -993,6 +999,10 @@ function buildSyncRows(npcs, portController, ws) {
         row.hcz = n.homeCz | 0;
         if (n.homeDockX != null) row.hdx = Math.round(n.homeDockX * 10) / 10;
         if (n.homeDockZ != null) row.hdz = Math.round(n.homeDockZ * 10) / 10;
+        if (n.isTroopTransport) {
+          row.trp = 1;
+          row.tfac = (n.troopFaction | 0) % FACTION_COUNT;
+        }
       }
       return row;
     });
@@ -1144,6 +1154,7 @@ function createServerNpcWorld(opts) {
       ? opts.politicsRef
       : { matrix: makePoliticsMatrix(ws), portController: Object.create(null), factionWealth: [1400, 1400, 1400, 1400, 1400] };
   const onTownCargo = typeof opts.onTownCargo === 'function' ? opts.onTownCargo : null;
+  const onTroopLanding = typeof opts.onTroopLanding === 'function' ? opts.onTroopLanding : null;
   let ctx = createTerrainContext({ worldSeed: ws, edgeClamp: baseEdgeClamp, worldMapPayload: worldMapPayloadRef });
   let dryLand = (x, z) => ctx.dryLandAtWorldPosition(x, z)
     || (typeof ctx.reefBlocksPoint === 'function' && ctx.reefBlocksPoint(x, z, 0.76));
@@ -1203,6 +1214,7 @@ function createServerNpcWorld(opts) {
       const sailPick = sr() > 0.55 ? 'silk' : 'basic';
       const cannonPart = tradeShipCannonForType(st);
       const homeFac = townFaction(home, politics.portController, ws) % FACTION_COUNT;
+      const isTroop = sr() < 0.13;
       const npc = {
         syncId: TRADE_NPC_SYNC_START + tradeSyncIdx,
         x: nx,
@@ -1217,6 +1229,10 @@ function createServerNpcWorld(opts) {
         flagColor: FACTION_TRADE_COLORS[homeFac],
         flagAssetId: factionFlagPngIdForFaction(homeFac),
         isTradeShip: true,
+        isTroopTransport: isTroop,
+        troopFaction: homeFac,
+        troopCount: isTroop ? (90 + Math.floor(sr() * 200)) : 0,
+        troopGold: isTroop ? (180 + Math.floor(sr() * 420)) : 0,
         aggro: false,
         homeDockX: home.dockX,
         homeDockZ: home.dockZ,
@@ -1796,7 +1812,11 @@ function createServerNpcWorld(opts) {
         }
         if (npc.tradeTimer <= 0) {
           if (phase === 'dock_dest') {
-            if (onTownCargo && npc.cargoGood && !npc.isTroopTransport) {
+            if (npc.isTroopTransport && onTroopLanding) {
+              const dk = portStockKey({ cx: npc.destCx, cz: npc.destCz, hasTown: true, customTownId: npc.destCustomTownId });
+              const destFac = townFaction({ cx: npc.destCx, cz: npc.destCz, hasTown: true, customTownId: npc.destCustomTownId }, politics.portController, ws);
+              onTroopLanding(dk, destFac, (npc.troopFaction | 0) % FACTION_COUNT, npc.troopCount | 0, npc.troopGold | 0);
+            } else if (onTownCargo && npc.cargoGood) {
               const dk = portStockKey({ cx: npc.destCx, cz: npc.destCz, hasTown: true, customTownId: npc.destCustomTownId });
               const dq = npc.cargoUnits != null ? npc.cargoUnits : TRADE_DELIVERY_UNITS;
               onTownCargo('add', dk, npc.cargoGood, dq, npc.destCx | 0, npc.destCz | 0);

@@ -145,8 +145,41 @@ function createWorldPoliticsStore(opts) {
     markDirty();
   }
 
+  function ensureGarrisonRow(key) {
+    if (!key) return null;
+    if (portGarrison[key] && typeof portGarrison[key] === 'object') return portGarrison[key];
+    let h = 0;
+    const k = String(key);
+    for (let i = 0; i < k.length; i++) h = (h * 31 + k.charCodeAt(i)) >>> 0;
+    portGarrison[key] = { men: 160 + (h % 240), payrollDue: 30 + (h % 50) };
+    return portGarrison[key];
+  }
+
+  function applyTroopLanding(key, destFac, atkFac, troops, gold) {
+    const dk = String(key || '').slice(0, 64);
+    if (!dk) return false;
+    const dest = (Number(destFac) | 0) % FACTION_COUNT;
+    const atk = (Number(atkFac) | 0) % FACTION_COUNT;
+    const menIn = Math.max(0, Math.floor(Number(troops) || 0));
+    const goldIn = Math.max(0, Math.floor(Number(gold) || 0));
+    const g = ensureGarrisonRow(dk);
+    if (!g) return false;
+    if (dest !== atk) {
+      g.men = Math.max(0, (g.men || 200) - menIn);
+      factionWealth[atk] = Math.max(80, (factionWealth[atk] || 1000) - Math.min(160, goldIn));
+      if (g.men <= 0) {
+        portController[dk] = atk;
+        g.men = 100 + (menIn % 130);
+      }
+    } else {
+      g.men = (g.men || 200) + Math.floor(menIn * 0.12);
+    }
+    markDirty();
+    return true;
+  }
+
   function getNpcPoliticsRef() {
-    return { matrix, portController, factionWealth };
+    return { matrix, portController, factionWealth, portGarrison };
   }
 
   function mergePortControllerFromClient(pc) {
@@ -231,6 +264,7 @@ function createWorldPoliticsStore(opts) {
     getPlayerStanding,
     consumeDirty,
     applyTownCargo,
+    applyTroopLanding,
     consumeStockpileDirty,
     get townStockpiles() {
       return townStockpiles;

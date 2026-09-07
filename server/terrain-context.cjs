@@ -182,7 +182,10 @@ function buildSeaReefOccupancy(worldSeed, dryLand, chunkSize) {
       else if (form < 0.72) nSpires = 3;
       else nSpires = 4;
       const armBase = 0.32 + rng() * 0.48;
-      const hitR = 0.72 + nSpires * 0.16 + armBase * 0.38 + 0.22;
+      const hasBoulder = rng() < 0.34;
+      const jitter = rng();
+      const pieces = nSpires + (hasBoulder ? 1 : 0);
+      const hitR = 0.72 + pieces * 0.16 + armBase * 0.38 + jitter * 0.45;
       out.push({ x: wx, z: wz, r: hitR * 0.82 });
     }
   }

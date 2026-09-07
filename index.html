@@ -3039,8 +3039,10 @@ function clampPlayerIntoWorldBounds() {
   G.player.x = Math.max(-lim, Math.min(lim, G.player.x));
   G.player.z = Math.max(-lim, Math.min(lim, G.player.z));
 }
-/** Authoritative sim + AOI `state` / `npc_sync` rate — must match `server.js` `TICK_RATE`. */
+/** Authoritative sim + AOI `state` rate — must match `server.js` `TICK_RATE`. */
 const NET_SYNC_HZ = 60;
+/** Dedicated-server `npc_sync` cadence (every 3 sim ticks). */
+const NPC_SYNC_HZ = 20;
 /** Keep AI merchants & pirates inside the playable archipelago (world edge is empty ocean). */
 function clampNpcIntoWorldBounds(npc) {
   if (!npc) return;
@@ -7227,6 +7229,8 @@ function ensureSeaReefsPopulated() {
       else if (form < 0.72) nSpires = 3;
       else nSpires = 4;
       const armBase = 0.32 + rng() * 0.48;
+      const hasBoulder = rng() < 0.34;
+      const jitter = rng();
       const kinds = ['full', 'slim', 'wide'];
       const pieces = [];
       for (let pi = 0; pi < nSpires; pi++) {
@@ -7239,7 +7243,7 @@ function ensureSeaReefsPopulated() {
         const sp = buildSeaReefSpireGroup(lx, lz, floorY, surf, rng, kind);
         if (sp) pieces.push(sp);
       }
-      if (rng() < 0.34) {
+      if (hasBoulder) {
         const bx = wx + Math.cos(baseAng + 1.1) * armBase * 0.55;
         const bz = wz + Math.sin(baseAng + 1.1) * armBase * 0.55;
         const b = buildSeaReefBoulderCluster(bx, bz, floorY, rng);
@@ -7248,7 +7252,8 @@ function ensureSeaReefsPopulated() {
       if (!pieces.length) continue;
       pieces.forEach(p => group.add(p));
       addSeaReefRubble(group, wx, wz, floorY, rng, 2 + Math.floor(rng() * 7));
-      const hitR = 0.72 + pieces.length * 0.16 + armBase * 0.38 + rng() * 0.45;
+      const discPieces = nSpires + (hasBoulder ? 1 : 0);
+      const hitR = 0.72 + discPieces * 0.16 + armBase * 0.38 + jitter * 0.45;
       G.seaReefs.push({ x: wx, z: wz, r: hitR * 0.82 });
       scene.add(group);
       G.seaReefRoots.push(group);
@@ -7843,6 +7848,16 @@ function refreshPortFactionVisuals(cx, cz) {
       }
     }
     break;
+  }
+}
+function refreshAllLoadedPortFactionVisuals() {
+  const seen = new Set();
+  for (const isl of G.islands || []) {
+    if (!isl || !isl.hasTown) continue;
+    const k = (isl.cx | 0) + ',' + (isl.cz | 0);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    refreshPortFactionVisuals(isl.cx, isl.cz);
   }
 }
 
@@ -9473,6 +9488,7 @@ function assignTradeRouteFromHome(npc, homeMeta, list, sr) {
   npc.homeDockZ = homeMeta.dockZ;
   npc.homeCx = homeMeta.cx;
   npc.homeCz = homeMeta.cz;
+  npc.homeCustomTownId = homeMeta.customTownId != null ? homeMeta.customTownId : null;
   npc.cargoGood = portExportsGood(homeMeta);
   let dest = pickTradeDestination(homeMeta, list, sr);
   if (!dest) {
@@ -9482,6 +9498,7 @@ function assignTradeRouteFromHome(npc, homeMeta, list, sr) {
   if (!dest) return;
   npc.destCx = dest.cx;
   npc.destCz = dest.cz;
+  npc.destCustomTownId = dest.customTownId != null ? dest.customTownId : null;
   npc.tradeDestX = dest.dockX;
   npc.tradeDestZ = dest.dockZ;
   npc.cargoUnits = 10 + (Math.floor(sr() * 10) | 0);
@@ -18278,11 +18295,11 @@ function updateNPCs(dt) {
           if (npc.tradeTimer <= 0) {
             if (phase === 'dock_dest') {
               initTownStockpiles();
-              const dk = portStockKey({ cx: npc.destCx, cz: npc.destCz, hasTown: true });
+              const dk = portStockKey({ cx: npc.destCx, cz: npc.destCz, hasTown: true, customTownId: npc.destCustomTownId });
               if (npc.isTroopTransport) {
                 ensurePolitics();
                 ensurePortGarrisonForKey(dk);
-                const destFac = townFaction({ cx: npc.destCx, cz: npc.destCz, hasTown: true });
+                const destFac = townFaction({ cx: npc.destCx, cz: npc.destCz, hasTown: true, customTownId: npc.destCustomTownId });
                 const atk = (npc.troopFaction | 0) % FACTION_COUNT;
                 const troops = npc.troopCount | 0;
                 const g = G.politics.portGarrison[dk];
@@ -19985,6 +20002,10 @@ function buildNpcFromNetSyncData(nd, nid) {
     npc.homeDockX = nd.hdx;
     npc.homeDockZ = nd.hdz;
     npc.homeFaction = ffi;
+    if (nd.trp) {
+      npc.isTroopTransport = true;
+      npc.troopFaction = nd.tfac != null ? (nd.tfac | 0) % FACTION_COUNT : ffi;
+    }
     npc.tradeCannon = tradeShipCannonForType(tp);
     npc.sailPick = 'basic';
     const mesh = buildShipMesh(tp, { hull: 'basic', sail: 'basic', cannon: npc.tradeCannon, figurehead: 'none', flag: fp }, fc, nm, { merchantHull: true, flagAssetId: fa });
@@ -20445,7 +20466,10 @@ async function connectToServer() {
               if (pw.fw[i] != null && Number.isFinite(Number(pw.fw[i]))) G.politics.factionWealth[i] = Number(pw.fw[i]);
             }
           }
-          if (pw.pc && typeof pw.pc === 'object') G.politics.portController = { ...pw.pc };
+          if (pw.pc && typeof pw.pc === 'object') {
+            G.politics.portController = { ...pw.pc };
+            refreshAllLoadedPortFactionVisuals();
+          }
           if (pw.inf != null && Number.isFinite(Number(pw.inf))) G.politics.inflation = Number(pw.inf);
           if (pw.pg && typeof pw.pg === 'object') G.politics.portGarrison = { ...pw.pg };
           if (pw.ts && typeof pw.ts === 'object') applyTownStockpilesFromNet(pw.ts);
@@ -21306,7 +21330,10 @@ async function connectToServer() {
             if (msg.fw[i] != null && Number.isFinite(Number(msg.fw[i]))) G.politics.factionWealth[i] = Number(msg.fw[i]);
           }
         }
-        if (msg.pc && typeof msg.pc === 'object') G.politics.portController = { ...msg.pc };
+        if (msg.pc && typeof msg.pc === 'object') {
+          G.politics.portController = { ...msg.pc };
+          refreshAllLoadedPortFactionVisuals();
+        }
         if (msg.inf != null && Number.isFinite(Number(msg.inf))) G.politics.inflation = Number(msg.inf);
         if (msg.pg && typeof msg.pg === 'object') G.politics.portGarrison = { ...msg.pg };
         if (msg.ts && typeof msg.ts === 'object') applyTownStockpilesFromNet(msg.ts);
@@ -21670,6 +21697,10 @@ function applyNpcSyncMessage(msg, opts) {
     if (nd.hcz != null) npc.homeCz = nd.hcz | 0;
     if (nd.hdx != null) npc.homeDockX = nd.hdx;
     if (nd.hdz != null) npc.homeDockZ = nd.hdz;
+    if ('trp' in nd) {
+      npc.isTroopTransport = !!nd.trp;
+      if (nd.tfac != null) npc.troopFaction = (nd.tfac | 0) % FACTION_COUNT;
+    }
     if (nd.ffi != null) {
       const f = (nd.ffi | 0) % FACTION_COUNT;
       if (npc.isTradeShip) npc.homeFaction = f;
@@ -23671,31 +23702,31 @@ function collectResolvableBinaryGameAssetUrls() {
   const rels = [
     'assets/json-parse-worker.js',
     'assets/multiplayer-server.json',
-    'assets/3d models/buildings/church1.glb',
-    'assets/3d models/buildings/dock1.glb',
-    'assets/3d models/buildings/govres1.glb',
+    'assets/3d models/buildings/church.glb',
+    'assets/3d models/buildings/dock.glb',
+    'assets/3d models/buildings/govmansion.glb',
     'assets/3d models/buildings/house1.glb',
     'assets/3d models/buildings/house2.glb',
     'assets/3d models/buildings/tavern.glb',
+    'assets/3d models/decorations/barrel.glb',
     'assets/3d models/decorations/bush1.glb',
     'assets/3d models/decorations/bush2.glb',
+    'assets/3d models/decorations/bush3.glb',
+    'assets/3d models/decorations/crate.glb',
+    'assets/3d models/decorations/jaggedrocks1.glb',
+    'assets/3d models/decorations/jaggedrocks2.glb',
     'assets/3d models/decorations/tree1.glb',
     'assets/3d models/decorations/tree2.glb',
-    'assets/3d models/decorations/tree3.glb',
-    'assets/3d models/ships/galleon1.glb',
-    'assets/3d models/ships/galleon2.glb',
-    'assets/3d models/ships/galleon3.glb',
-    'assets/3d models/ships/galleon4.glb',
-    'assets/3d models/ships/pirate-sloop1.glb',
+    'assets/3d models/ships/piratesloop.glb',
     'assets/3d models/ships/sloop1.glb',
-    'assets/3d models/ships/sloop2.glb',
-    'assets/3d models/ships/sloop3.glb',
     'assets/3d models/wildlife/fish1.glb',
     'assets/3d models/wildlife/fish2.glb',
     'assets/3d models/wildlife/fish3.glb',
     'assets/3d models/wildlife/fish4.glb',
+    'assets/3d models/wildlife/fish5.glb',
+    'assets/3d models/wildlife/fish6.glb',
+    'assets/3d models/wildlife/fish7.glb',
     'assets/3d models/wildlife/seagul1.glb',
-    'assets/3d models/wildlife/seagul2.glb',
     'assets/3d models/wildlife/shark.glb',
     'assets/sound/effects/cannon-shot.wav',
     'assets/sound/effects/captain-fire-yell.wav',
@@ -31206,17 +31237,17 @@ function getEffectiveRttForNetInterpMs() {
 }
 
 /**
- * Delayed playback for remote hulls / NPC relay keys — **tight** RTT scaling (FPS-style: ~1–3 frames), not cruise-ship buffer.
- * Jitter EWMA adds a few ms only when packet spacing is irregular (stable links stay snappy).
+ * Delayed playback for remote hulls — scales with measured RTT so 200–400 ms links
+ * still have a sample to interpolate instead of snapping to the newest packet.
  */
 function getEffectiveHullSnapInterpDelayMs() {
   const r = getEffectiveRttForNetInterpMs();
   const j =
     G._netInterpJitterEwma != null && Number.isFinite(Number(G._netInterpJitterEwma))
-      ? Math.min(14, Math.max(0, Number(G._netInterpJitterEwma)) * 0.30)
+      ? Math.min(48, Math.max(0, Number(G._netInterpJitterEwma)) * 0.35)
       : 0;
-  const d = 10.5 + r * 0.1 + j;
-  return Math.max(16, Math.min(42, d));
+  const d = 18 + r * 0.45 + j;
+  return Math.max(22, Math.min(180, d));
 }
 
 function getEffectiveRemoteInterpDelayMs() {
@@ -31224,20 +31255,20 @@ function getEffectiveRemoteInterpDelayMs() {
 }
 
 function getEffectiveNpcInterpDelayMs() {
-  return getEffectiveHullSnapInterpDelayMs();
+  return Math.max(1000 / NPC_SYNC_HZ + 8, getEffectiveHullSnapInterpDelayMs());
 }
 
 /** Observers — a shade more lookahead than ultra-tight playout so Catmull samples aren’t sampled in the jittery nose of the buffer. */
 function getEffectiveNpcNetObservationInterpDelayMs(relayObserver) {
   void relayObserver;
-  return Math.max(14, getEffectiveHullSnapInterpDelayMs() - 3);
+  return Math.max(52, getEffectiveNpcInterpDelayMs() - 3);
 }
 
 /**
  * Other captains — ~2 server ticks @ 60Hz behind latest sample (low-latency FPS feel). Adaptive fn adds a little under jitter only.
  */
 function getEffectivePeerHullInterpDelayMs() {
-  return Math.max(18, getEffectiveHullSnapInterpDelayMs() + 7);
+  return Math.max(28, getEffectiveHullSnapInterpDelayMs() + 8);
 }
 
 /**
@@ -37431,9 +37462,79 @@ bindShipRenameModalOnce();
 requestAnimationFrame(gameLoop);
 
 window.render_game_to_text = function () {
-   return JSON.stringify({ mode: G.mode, boarding: !!G.boarding, player: { x: Math.round(G.player.x * 10) / 10, z: Math.round(G.player.z * 10) / 10, rotation: Math.round(G.player.rotation * 100) / 100, speed: Math.round(G.player.speed * 100) / 100, health: G.player.health, anchored: G.player.anchored, shipType: G.player.shipType, shipParts: G.player.shipParts, crewCount: G.player.crew.length, inventoryCount: G.player.inventory.reduce((a, b) => a + b.count, 0) }, world: { chunksLoaded: G.chunks.size, islandsVisible: G.islands.length, otherPlayers: G.otherPlayers.size, cannonballs: G.cannonballs.length, npcs: G.npcs.length }, camera: { zoomLevel: Math.round(G.camera.zoom), zoomHorizon: CAM_ZOOM_HORIZON, zoomDeck: CAM_ZOOM_DECK }, wind: { angle: Math.round(G.wind.angle * 100) / 100, speed: Math.round(G.wind.speed * 10) / 10 } });
+  const quests = (G.quests || []).slice(0, 8).map(q => ({
+    type: q.type,
+    accepted: !!q.accepted,
+    title: q.title || q.name || ''
+  }));
+  const near = G.nearDock;
+  return JSON.stringify({
+    mode: G.mode,
+    boarding: !!G.boarding,
+    docked: !!G.docked,
+    nearDock: !!(near && near.dockX != null),
+    dockName: near && near.townName ? String(near.townName) : '',
+    harborTruce: typeof playerInHarborRamExemptZone === 'function' && playerInHarborRamExemptZone(G.player.x, G.player.z, G.player.shipType),
+    myId: G.myId,
+    npcSimFromServer: !!G.npcSimFromServer,
+    rttMs: G.clientServerRttMs != null ? Math.round(G.clientServerRttMs) : null,
+    pendingResumeDock: !!G._pendingResumeDock,
+    quests,
+    player: {
+      x: Math.round(G.player.x * 10) / 10,
+      z: Math.round(G.player.z * 10) / 10,
+      rotation: Math.round(G.player.rotation * 100) / 100,
+      speed: Math.round(G.player.speed * 100) / 100,
+      health: G.player.health,
+      anchored: G.player.anchored,
+      shipType: G.player.shipType,
+      shipParts: G.player.shipParts,
+      crewCount: G.player.crew.length,
+      inventoryCount: G.player.inventory.reduce((a, b) => a + b.count, 0)
+    },
+    world: {
+      chunksLoaded: G.chunks.size,
+      islandsVisible: G.islands.length,
+      otherPlayers: G.otherPlayers.size,
+      cannonballs: G.cannonballs.length,
+      npcs: G.npcs.length,
+      troops: G.npcs.filter(n => n.isTroopTransport).length
+    },
+    camera: { zoomLevel: Math.round(G.camera.zoom), zoomHorizon: CAM_ZOOM_HORIZON, zoomDeck: CAM_ZOOM_DECK },
+    wind: { angle: Math.round(G.wind.angle * 100) / 100, speed: Math.round(G.wind.speed * 10) / 10 }
+  });
 };
 window.advanceTime = (ms) => { const s = Math.max(1, Math.round(ms / (1000 / 60))); for (let i = 0; i < s; i++) update(1 / 60); render(); };
+window.__playtestGotoNearestPortAndDock = function () {
+  let ports = [];
+  try { ports = collectAllTradingPorts(); } catch (e) { ports = []; }
+  const islandPort = (G.islands || []).find(i => i && i.hasTown && i.dockX != null);
+  const p = (ports && ports[0]) || islandPort || null;
+  if (!p) {
+    return {
+      ok: false,
+      reason: 'no-port',
+      customTowns: G.customMap && G.customMap.towns ? G.customMap.towns.length : 0,
+      islandTowns: (G.islands || []).filter(i => i && i.hasTown).length,
+      islands: (G.islands || []).length
+    };
+  }
+  G.player.x = p.dockX;
+  G.player.z = p.dockZ;
+  G.nearDock = p;
+  try { updateChunks(); } catch (e) {}
+  dockAtPort();
+  return {
+    ok: true,
+    port: { name: p.townName || '', x: p.dockX, z: p.dockZ },
+    state: JSON.parse(window.render_game_to_text())
+  };
+};
+window.__playtestReconnect = async function () {
+  const before = JSON.parse(window.render_game_to_text());
+  try { await connectToServer(); } catch (e) {}
+  return { before };
+};
 </script>
 <script async src="https://vibej.am/2026/widget.js"></script>
 </body>

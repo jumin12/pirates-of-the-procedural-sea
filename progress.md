@@ -73,7 +73,18 @@ Fixed dedicated-server and multiplayer bugs that broke combat, quests, and ship 
 - Dedicated-server NPC nav uses the same reef occupancy walk as the client and can wreck on reefs.
 - Merchant load/unload updates server town stockpiles and broadcasts `town_stockpiles` / `politics_snap.ts`.
 
+## 2026-09-07 leftovers pass (harbor / reefs / troops / ping / sync)
+
+- Harbor PvP truce is server-enforced on `pvp_hit_claim` and `pvp_ram_report` (both hulls within 50u of a dock).
+- Reef collision discs now consume the same boulder + jitter RNG as the client (no more estimated radius).
+- Dedicated-server merchants can spawn as troop transports; dock_dest runs `applyTroopLanding` and broadcasts `politics_snap` (garrison / controller flip).
+- Remote hull interp scales with RTT (up to 180ms). Server rewinds victim/attacker history using reported RTT before accepting cannon claims.
+- `npc_sync` is 20 Hz (every 3 ticks). Player `state` stays 60 Hz. Default `STATE_AOI_RADIUS` is 3200.
+- Playtest: new voyage → dedicated-server NPC roster (troop transports present) → dock at Île de Ré Downs (harbor truce + town stock) → reconnect stays docked. Asset URLs with spaces (`3d models`) are now decoded so local GLBs can be served.
+
 ## TODOs / Suggestions for next agent
 
-- Harbor PvP truce is still client-enforced on the claim send; consider a server-side harbor test.
-- Reef collision radii on the server are an estimate (no mesh piece count); scrape feel may differ slightly from the client.
+- Smoothness still depends on machine, player count, and GLB load. No full load-test at 20+ captains.
+- High ping can still look wrong; rewind + wider interp reduces “I hit / you didn’t,” it does not remove lag.
+- Full live PvP/boarding/quest session still needs a second human client. Automated playtest covers sail / dock-proximity / reconnect hooks, not two-player combat.
+- If `buildSeaReefSpireGroup` fails on the client, that reef is skipped visually but the server still has a disc.
