@@ -213,6 +213,17 @@ body.game-boot-active #create-screen{ pointer-events:none !important; }
   #story-brief-hud .story-brief-title{font-size:10px;margin-bottom:4px;}
   #story-brief-hud .story-brief-text{font-size:11.5px;line-height:1.45;}
 }
+body.offline-solo #btn-chat,
+body.offline-solo #chat-box,
+body.offline-solo #clan-invite-popup,
+body.offline-solo #chat-badge,
+body.offline-solo #clan-invite-badge,
+body.offline-solo .log-tab[data-tab="pirates"]{
+  display:none !important;
+}
+body.offline-solo.game-playing #chat-box{
+  display:none !important;
+}
 @media (max-width:768px){
   #pc-combat-hud-bar{display:contents;}
 }
@@ -2077,7 +2088,9 @@ body.game-help-mobile-minimal #game-help-panel{
       <div style="color:var(--brass);font-size:14px;font-weight:bold;margin-bottom:8px;" id="save-ship-name"></div>
       <div style="font-size:12px;color:#a09080;line-height:1.7;" id="save-details"></div>
     </div>
-    <button type="button" id="start-btn" class="menu-btn-gold menu-btn-primary" style="width:100%;max-width:320px;">Create Your Crew</button>
+    <button type="button" id="start-btn" class="menu-btn-gold menu-btn-primary" style="width:100%;max-width:320px;">Singleplayer</button>
+    <button type="button" id="online-btn" class="menu-btn-gold menu-btn-primary" style="width:100%;max-width:320px;margin-top:12px;">Multiplayer</button>
+    <div style="margin:10px auto 0;max-width:320px;font-size:11px;color:#8a7a68;line-height:1.45;">Singleplayer is local — no chat or clans. Multiplayer joins the shared realm.</div>
     <button type="button" id="new-game-btn" class="menu-btn-gold menu-btn-primary" style="display:none;margin-top:12px;width:100%;max-width:320px;">Start New Voyage</button>
     <div class="menu-secondary-btns">
       <button type="button" id="menu-settings-btn" class="menu-btn-gold menu-btn-secondary" style="flex:1;min-width:0;">Settings</button>
@@ -3373,6 +3386,8 @@ const G = {
   /** @type {null | { heights: Float32Array, gridN: number, waterThreshold: number, maxLandHeight: number, worldEdgeClamp: number, entities: object[], towns: object[], wind?: object, seed?: number }} */
   customMap: null,
   playWorldAwaitingNetInit: false,
+  offlineSolo: false,
+  pendingPlayMode: null,
   fallbackWorldSeed: 42,
   time: 0,
   dt: 0,
@@ -16285,6 +16300,11 @@ function pickUniqueNPCShipNames(count, rng) {
 }
 /** True when this session runs the full NPC AI step and may send `npc_sync` (server picks the stepper; solo always local). */
 function isMultiplayerHost() {
+  if (G.offlineSolo) {
+    G.multiplayerNpcAuthorityId = null;
+    G.iAmMultiplayerNpcStepper = true;
+    return true;
+  }
   if (!ws || ws.readyState !== 1) {
     G.multiplayerNpcAuthorityId = null;
     return true;
@@ -19931,6 +19951,7 @@ function applySharedWorldFromServerSeed(s, opts) {
   }
 }
 function startServerSeedPrefetch() {
+  if (G.offlineSolo) return;
   prefetchedServerSeed = null;
   ensureServerEndpoints()
     .then(() => fetch(getHealthUrl(), { cache: 'no-store' }))
@@ -19962,10 +19983,11 @@ function startServerSeedPrefetch() {
     .catch(() => {});
 }
 function schedulePlayWorldNetFallback() {
+  if (G.offlineSolo) return;
   if (playWorldNetTimeoutId) clearTimeout(playWorldNetTimeoutId);
   playWorldNetTimeoutId = setTimeout(async () => {
     playWorldNetTimeoutId = null;
-    if (!G.playWorldAwaitingNetInit || G.mode !== 'playing') return;
+    if (G.offlineSolo || !G.playWorldAwaitingNetInit || G.mode !== 'playing') return;
     try { await ensureServerEndpoints(); } catch (e) {}
     let s = prefetchedServerSeed;
     let fromHttp = s != null;
@@ -20307,7 +20329,71 @@ function applyRtcCandidate(msg) {
   } catch (e) {}
 }
 
+function isOfflineSolo() {
+  return !!G.offlineSolo;
+}
+const PLAY_MODE_PREF_KEY = 'pirates_play_mode';
+function persistPlayModePreference(mode) {
+  try { localStorage.setItem(PLAY_MODE_PREF_KEY, mode === 'online' ? 'online' : 'solo'); } catch (e) {}
+}
+function readPlayModePreference() {
+  try {
+    if (localStorage.getItem(PLAY_MODE_PREF_KEY) === 'online') return 'online';
+  } catch (e) {}
+  return 'solo';
+}
+function applyOfflineSoloPresentation() {
+  const on = !!G.offlineSolo;
+  try { document.body.classList.toggle('offline-solo', on); } catch (e) {}
+  if (on) {
+    try { hideClanInviteOnlinePopup(); } catch (e) {}
+    const chat = document.getElementById('chat-box');
+    if (chat) chat.style.display = 'none';
+    G.party = null;
+    G.partyInvite = null;
+  }
+}
+function setPlaySessionMode(mode) {
+  const solo = mode === 'solo';
+  G.pendingPlayMode = solo ? 'solo' : 'online';
+  G.offlineSolo = solo;
+  persistPlayModePreference(G.pendingPlayMode);
+  if (solo) {
+    G.playWorldAwaitingNetInit = false;
+    G.npcSimFromServer = false;
+    G.npcSimDelegatedByServer = false;
+    G.iAmMultiplayerNpcStepper = true;
+    G.multiplayerNpcAuthorityId = null;
+    G.myId = null;
+    try {
+      if (typeof ws !== 'undefined' && ws) {
+        ws.onclose = null;
+        ws.close();
+      }
+    } catch (e) {}
+    try { ws = null; } catch (e2) {}
+    try { setMultiplayerConnectingOverlay(false); } catch (e3) {}
+  }
+  applyOfflineSoloPresentation();
+}
+function beginPlaySessionNetworking() {
+  applyOfflineSoloPresentation();
+  if (G.offlineSolo) {
+    G.playWorldAwaitingNetInit = false;
+    G.npcSimFromServer = false;
+    try { setMultiplayerConnectingOverlay(false); } catch (e) {}
+    return;
+  }
+  startServerSeedPrefetch();
+  connectToServer();
+  schedulePlayWorldNetFallback();
+}
+
 async function connectToServer() {
+  if (G.offlineSolo) {
+    try { setMultiplayerConnectingOverlay(false); } catch (e) {}
+    return;
+  }
   if (wsUserBanned) return;
   G.netDesyncFrozen = false;
   G._netDesyncSticky = 0;
@@ -21522,6 +21608,7 @@ function getNavigatorSessionToken() {
   }
 }
 function sendUpdate(includeCrew) {
+  if (G.offlineSolo) return;
   const dcOpen = !!(G._rtcGameDc && G._rtcGameDc.readyState === 'open');
   if ((!ws || ws.readyState !== 1) && !dcOpen) return;
   if (G.netDesyncFrozen) return;
@@ -22398,6 +22485,7 @@ window.addEventListener('keydown', e => {
     syncAnchorToolbarButton();
   }
   if (k === 't') {
+    if (G.offlineSolo) return;
     if (shouldDockChatPanel() && G.mode === 'playing') {
       unreadChat = 0;
       const badge = document.getElementById('chat-badge');
@@ -24896,6 +24984,7 @@ function hideClanInviteOnlinePopup() {
   root.setAttribute('aria-hidden', 'true');
 }
 function showClanInviteOnlinePopup() {
+  if (G.offlineSolo) return;
   const root = document.getElementById('clan-invite-popup');
   const txt = document.getElementById('clan-invite-popup-text');
   if (!root || !txt || !G.partyInvite || G.party) return;
@@ -28257,6 +28346,7 @@ function startCaptainsLogLiveRefresh() {
   captainsLogPollTimer = setInterval(tick, _logIv);
 }
 function switchLogTab(name) {
+  if (name === 'pirates' && G.offlineSolo) name = 'ship';
   document.querySelectorAll('.log-tab').forEach(t => { t.classList.remove('active'); t.style.borderBottom = 'none'; t.style.color = '#8f7a68'; });
   document.querySelectorAll('.log-content').forEach(c => c.style.display = 'none');
   const lp0 = document.getElementById('log-panel');
@@ -28289,6 +28379,7 @@ function switchLogTab(name) {
   if (name === 'world') updateWorldPanel();
 }
 document.getElementById('btn-chat').onclick = () => {
+  if (G.offlineSolo) return;
   if (shouldDockChatPanel() && G.mode === 'playing') {
     unreadChat = 0;
     const badge = document.getElementById('chat-badge');
@@ -35169,11 +35260,13 @@ function buildTutorialStepsMobile() {
     title: 'Captain\'s Log',
     body: 'Ship, cargo, crew, missions — bottom toolbar, scrollable book icon.'
   });
-  steps.push({
-    sel: '#btn-chat',
-    title: 'Chat',
-    body: 'Hail other captains — opens the speaking tube.'
-  });
+  if (!G.offlineSolo) {
+    steps.push({
+      sel: '#btn-chat',
+      title: 'Chat',
+      body: 'Hail other captains — opens the speaking tube.'
+    });
+  }
   steps.push({
     sel: '#btn-anchor',
     title: 'Anchor',
@@ -35768,7 +35861,8 @@ function beginVoyageAfterCharacter() {
   kickOffGameAssetPreload();
   G.player.speed = 1;
   G.fallbackWorldSeed = CANONICAL_DEFAULT_WORLD_SEED >>> 0;
-  G.playWorldAwaitingNetInit = true;
+  setPlaySessionMode(G.pendingPlayMode || readPlayModePreference());
+  G.playWorldAwaitingNetInit = !G.offlineSolo;
   G.remotePlayerStories.clear();
   G.npcs.forEach(n => { if (n.mesh) scene.remove(n.mesh); });
   G.npcs = [];
@@ -35806,9 +35900,7 @@ function beginVoyageAfterCharacter() {
       if (tz0) { tz0.style.display = 'flex'; syncTouchZoomLayer(); }
       applyMobileControlScheme(G.mobileControlScheme);
     }
-    startServerSeedPrefetch();
-    connectToServer();
-    schedulePlayWorldNetFallback();
+    beginPlaySessionNetworking();
     renderer.domElement.focus(); document.body.focus();
     applyWebAudioSfxMasterGain();
     syncMusicAndTravelVolume();
@@ -35924,9 +36016,11 @@ function refreshMainMenuSavePanel() {
   let hasSaveNow = false;
   try { hasSaveNow = !!localStorage.getItem(SAVE_KEY); } catch (e) {}
   const startBtn = document.getElementById('start-btn');
+  const onlineBtn = document.getElementById('online-btn');
   const saveInfo = document.getElementById('save-info');
   const newGameBtn = document.getElementById('new-game-btn');
-  if (startBtn) startBtn.textContent = hasSaveNow ? 'Continue Voyage' : 'Create Your Crew';
+  if (startBtn) startBtn.textContent = 'Singleplayer';
+  if (onlineBtn) onlineBtn.textContent = 'Multiplayer';
   if (saveInfo) saveInfo.style.display = hasSaveNow ? 'block' : 'none';
   if (newGameBtn) newGameBtn.style.display = hasSaveNow ? 'block' : 'none';
   if (hasSaveNow) {
@@ -35961,6 +36055,8 @@ function exitGameToMainMenu() {
   G.mode = 'start';
   G.player.speed = 0;
   G.playWorldAwaitingNetInit = false;
+  G.offlineSolo = false;
+  try { document.body.classList.remove('offline-solo'); } catch (e0) {}
   try {
     if (ws) {
       ws.onclose = null;
@@ -36056,6 +36152,7 @@ function clearClanLocalSnapshot() {
 
 function persistClanLocalSnapshotFromParty(party) {
   try {
+    if (G.offlineSolo) return;
     const ck = captainNameStorageKey(G.myCaptainKey || getCaptainDisplayCrew()?.name || '');
     if (!ck || !party || typeof party !== 'object' || !party.id) {
       clearClanLocalSnapshot();
@@ -36078,6 +36175,7 @@ function persistClanLocalSnapshotFromParty(party) {
 
 function tryRestoreClanFromLocalSnapshot() {
   try {
+    if (G.offlineSolo) return;
     if (G.party && G.party.id) return;
     const raw = localStorage.getItem(CLAN_LOCAL_SNAPSHOT_KEY);
     if (!raw) return;
@@ -36094,6 +36192,7 @@ function tryRestoreClanFromLocalSnapshot() {
 /** Older voyages only had clan in `pirates_save_v1` after this field was added; restores clan when the dedicated snapshot key is missing. */
 function tryRestoreClanFromEmbeddedVoyageSave(data) {
   try {
+    if (G.offlineSolo) return;
     if (G.party && G.party.id) return;
     if (!data || !data.clanSnap || typeof data.clanSnap !== 'object') return;
     const p = data.clanSnap.party;
@@ -36363,6 +36462,7 @@ function saveProgress() {
       lastCrewMealCycle: G._crewLastMealCycle != null ? G._crewLastMealCycle : -1,
       clanSnap: (() => {
         try {
+          if (G.offlineSolo) return null;
           if (!G.party || !G.party.id) return null;
           const myK = captainNameStorageKey(G.myCaptainKey || getCaptainDisplayCrew()?.name || '');
           if (!myK) return null;
@@ -36393,6 +36493,7 @@ function saveProgress() {
         const s = G.player.sailBanner && typeof G.player.sailBanner === 'object' ? sanitizeBannerDesignClient(G.player.sailBanner) : null;
         return s || null;
       })(),
+      offlineSolo: !!G.offlineSolo,
       serverCaptainKey: (G.myCaptainKey != null && String(G.myCaptainKey).trim()) ? String(G.myCaptainKey).trim() : null,
       captainAccountToken: (() => {
         try {
@@ -36825,7 +36926,8 @@ function drawMenuBg() {
   requestAnimationFrame(drawMenuBg);
 }
 
-document.getElementById('start-btn').onclick = () => {
+function enterVoyageFromMenu(mode) {
+  setPlaySessionMode(mode === 'online' ? 'online' : 'solo');
   if (voyageSaveExistsInStorage()) {
     if (!acquireGameTabLockOrExplain()) {
       resetDuplicateSessionOverlayCopy();
@@ -36842,7 +36944,8 @@ document.getElementById('start-btn').onclick = () => {
     kickOffGameAssetPreload();
     G.player.speed = Math.max(G.player.speed, 1);
     G.fallbackWorldSeed = CANONICAL_DEFAULT_WORLD_SEED >>> 0;
-    G.playWorldAwaitingNetInit = true;
+    setPlaySessionMode(mode === 'online' ? 'online' : 'solo');
+    G.playWorldAwaitingNetInit = !G.offlineSolo;
     G.remotePlayerStories.clear();
     G.npcs.forEach(n => { if (n.mesh) scene.remove(n.mesh); });
     G.npcs = [];
@@ -36875,20 +36978,20 @@ document.getElementById('start-btn').onclick = () => {
         if (tz1) { tz1.style.display = 'flex'; syncTouchZoomLayer(); }
         applyMobileControlScheme(G.mobileControlScheme);
       }
-      startServerSeedPrefetch();
-      connectToServer();
-      schedulePlayWorldNetFallback();
+      beginPlaySessionNetworking();
       renderer.domElement.focus(); document.body.focus();
       applyWebAudioSfxMasterGain();
       syncMusicAndTravelVolume();
-      notify('Progress restored');
+      notify(G.offlineSolo ? 'Progress restored — singleplayer' : 'Progress restored');
     });
   } else {
     document.getElementById('start-screen').style.display = 'none';
     document.getElementById('create-screen').style.display = 'block';
     buildCreationUI();
   }
-};
+}
+document.getElementById('start-btn').onclick = () => enterVoyageFromMenu('solo');
+document.getElementById('online-btn').onclick = () => enterVoyageFromMenu('online');
 
 function closeNewVoyageConfirmModal() {
   const m = document.getElementById('new-voyage-confirm-modal');
@@ -36897,6 +37000,7 @@ function closeNewVoyageConfirmModal() {
 
 function executeStartNewVoyageAfterConfirm() {
   closeNewVoyageConfirmModal();
+  if (!G.pendingPlayMode) G.pendingPlayMode = readPlayModePreference();
   wsUserBanned = false;
   const capNameEl = document.getElementById('cap-name');
   if (capNameEl) delete capNameEl.dataset.seededUnique;
@@ -37555,6 +37659,9 @@ window.render_game_to_text = function () {
   const near = G.nearDock;
   return JSON.stringify({
     mode: G.mode,
+    offlineSolo: !!G.offlineSolo,
+    wsOpen: !!(typeof ws !== 'undefined' && ws && ws.readyState === 1),
+    chatHidden: !!G.offlineSolo,
     boarding: !!G.boarding,
     docked: !!G.docked,
     nearDock: !!(near && near.dockX != null),
@@ -37620,6 +37727,10 @@ window.__playtestReconnect = async function () {
   const before = JSON.parse(window.render_game_to_text());
   try { await connectToServer(); } catch (e) {}
   return { before };
+};
+window.__playtestStartSolo = function () {
+  enterVoyageFromMenu('solo');
+  return { pending: G.pendingPlayMode, offlineSolo: !!G.offlineSolo };
 };
 </script>
 <script async src="https://vibej.am/2026/widget.js"></script>

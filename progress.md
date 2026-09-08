@@ -94,3 +94,14 @@ Fixed dedicated-server and multiplayer bugs that broke combat, quests, and ship 
 - Default graphics is **Medium** (Settings → Graphics). High is opt-in.
 - Medium/Low: no shadow pass, lower pixel ratio, coarser water, shorter view distance.
 - Per-frame: only nearby NPC sails/crew animate, chunk rebuilds only on chunk change, net drain capped, sailing updates send at 20 Hz, minimap every 4 frames, skip a WebGL frame when already under 30 fps.
+
+## 2026-09-07 singleplayer mode
+
+- Main menu now has **Singleplayer** and **Multiplayer**. Singleplayer never opens a WebSocket, never waits on server seed, and hides chat / clan / notorious-pirates UI.
+- Same local voyage save can be continued in either mode. New Voyage uses the last chosen mode (defaults to solo).
+- Local NPC AI, tutorial raid, docking, quests, and ports still run on the client.
+
+## TODOs / Suggestions for next agent
+
+- Singleplayer still needs a static file host for assets if you are not opening via `node server.js`; it just does not join the realm.
+- Multiplayer + solo share one `pirates_save_v1`. Switching modes mid-career is allowed; clan state is not restored while offline.
